@@ -28,16 +28,19 @@ jobs:
             preset: macOS
             lib_name: librama_sim.dylib
             artifact: RamaCycle-macos.zip
+            out_name: RamaCycle.zip
           - os: ubuntu-latest
             platform: linux
             preset: Linux
             lib_name: librama_sim.so
             artifact: RamaCycle-linux.zip
+            out_name: RamaCycle.x86_64
           - os: windows-latest
             platform: windows
             preset: Windows Desktop
             lib_name: rama_sim.dll
             artifact: RamaCycle-windows.zip
+            out_name: RamaCycle.exe
 
     runs-on: ${{ matrix.os }}
     defaults:
@@ -71,59 +74,42 @@ jobs:
           esac
           ls -la game/bin/
 
-      - name: Cache Godot
-        id: cache-godot
-        uses: actions/cache@v4
-        with:
-          path: |
-            ${{ runner.temp }}/godot
-            ~/.local/share/godot/export_templates
-            ~/Library/Application Support/Godot/export_templates
-            ~/AppData/Roaming/Godot/export_templates
-          key: godot-${{ env.GODOT_VERSION }}-${{ matrix.platform }}
-
       - name: Setup Godot
         uses: chickensoft-games/setup-godot@v2
         with:
           version: ${{ env.GODOT_VERSION }}
+          use-dotnet: false
           include-templates: true
 
       - name: Export ${{ matrix.platform }}
         run: |
-          mkdir -p dist/${{ matrix.platform }}
-          case "${{ matrix.platform }}" in
-            macos)
-              OUT="dist/macos/RamaCycle.zip"
-              ;;
-            linux)
-              OUT="dist/linux/RamaCycle.x86_64"
-              ;;
-            windows)
-              OUT="dist/windows/RamaCycle.exe"
-              ;;
-          esac
+          OUT_DIR="${GITHUB_WORKSPACE}/dist/${{ matrix.platform }}"
+          mkdir -p "$OUT_DIR"
+          OUT="${OUT_DIR}/${{ matrix.out_name }}"
           godot --headless --path game --export-release "${{ matrix.preset }}" "$OUT"
-          ls -laR dist/
+          ls -laR "${GITHUB_WORKSPACE}/dist/"
 
       - name: Package artifact
         run: |
           mkdir -p package
           case "${{ matrix.platform }}" in
             macos)
-              cp dist/macos/RamaCycle.zip "package/${{ matrix.artifact }}"
+              cp "dist/macos/${{ matrix.out_name }}" "package/${{ matrix.artifact }}"
               ;;
             linux)
               (
                 cd dist/linux
-                zip -9 "../../package/${{ matrix.artifact }}" RamaCycle.x86_64 RamaCycle.x86_64.console 2>/dev/null \
-                  || zip -9 "../../package/${{ matrix.artifact }}" *
+                zip -9 "../../package/${{ matrix.artifact }}" *
               )
               ;;
             windows)
               (
                 cd dist/windows
-                zip -9 "../../package/${{ matrix.artifact }}" RamaCycle.exe RamaCycle.console.exe 2>/dev/null \
-                  || 7z a -tzip "../../package/${{ matrix.artifact }}" ./*
+                if command -v zip >/dev/null 2>&1; then
+                  zip -9 "../../package/${{ matrix.artifact }}" *
+                else
+                  7z a -tzip "../../package/${{ matrix.artifact }}" ./*
+                fi
               )
               ;;
           esac
@@ -138,6 +124,7 @@ jobs:
 
   release:
     needs: build
+    if: always() && needs.build.result != 'cancelled'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -146,12 +133,14 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           path: artifacts
+          merge-multiple: false
 
       - name: Flatten release files
         run: |
           mkdir -p release
           find artifacts -type f -name '*.zip' -exec cp {} release/ \;
           ls -la release/
+          test "$(find release -type f | wc -l)" -gt 0
 
       - name: Resolve version
         id: ver
@@ -173,7 +162,7 @@ jobs:
             **Controls:** WASD move · mouse look · Space jump · Shift run · dig / install modules · Esc menu
 
             ### Downloads
-            - **macOS** — `RamaCycle-macos.zip` (unzip and open the app; right-click → Open the first time)
+            - **macOS** — `RamaCycle-macos.zip` (unzip → right-click → Open the first time)
             - **Linux** — `RamaCycle-linux.zip`
             - **Windows** — `RamaCycle-windows.zip`
 
@@ -181,5 +170,6 @@ jobs:
           files: release/*
           draft: false
           generate_release_notes: true
+          fail_on_unmatched_files: false
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
