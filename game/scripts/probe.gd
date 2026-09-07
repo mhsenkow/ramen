@@ -1,0 +1,25 @@
+extends Node3D
+func _ready():
+	print("PROBE: start")
+	var t = ClassDB.instantiate("RamaTerrain")
+	print("PROBE: instantiated -> ", t)
+	if t == null:
+		print("PROBE: EXTENSION NOT LOADED"); get_tree().quit(); return
+	var t0 = Time.get_ticks_msec()
+	t.generate(0)
+	print("PROBE: generate ok ", Time.get_ticks_msec() - t0, " ms")
+	print("PROBE: params ", t.params())
+	t0 = Time.get_ticks_msec()
+	var s = t.find_spawn()
+	print("PROBE: spawn ", s, " in ", Time.get_ticks_msec() - t0, " ms")
+	t0 = Time.get_ticks_msec()
+	var f = t.far_mesh(720, 240, 1.2)
+	print("PROBE: far_mesh verts=", f["verts"].size(), " idx=", f["indices"].size(), " in ", Time.get_ticks_msec() - t0, " ms")
+	t0 = Time.get_ticks_msec()
+	var c = t.chunk_mesh(s["theta"], s["z"], 52.0, 1.25)
+	print("PROBE: chunk verts=", c["verts"].size(), " in ", Time.get_ticks_msec() - t0, " ms")
+	t0 = Time.get_ticks_msec()
+	var g = t.ground_below(s["theta"], s["z"], s["radius"] - 40.0)
+	print("PROBE: ground_below ", g, " in ", Time.get_ticks_msec() - t0, " ms")
+	print("PROBE: DONE")
+	get_tree().quit()

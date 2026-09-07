@@ -1,0 +1,185 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Release version (e.g. v0.1.0)"
+        required: true
+        default: "v0.1.0"
+
+permissions:
+  contents: write
+
+env:
+  GODOT_VERSION: "4.6.2"
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            platform: macos
+            preset: macOS
+            lib_name: librama_sim.dylib
+            artifact: RamaCycle-macos.zip
+          - os: ubuntu-latest
+            platform: linux
+            preset: Linux
+            lib_name: librama_sim.so
+            artifact: RamaCycle-linux.zip
+          - os: windows-latest
+            platform: windows
+            preset: Windows Desktop
+            lib_name: rama_sim.dll
+            artifact: RamaCycle-windows.zip
+
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build simulation core
+        working-directory: sim
+        run: cargo build --release --lib
+
+      - name: Install native library
+        run: |
+          mkdir -p game/bin
+          case "${{ matrix.platform }}" in
+            macos)
+              cp sim/target/release/librama_sim.dylib "game/bin/${{ matrix.lib_name }}"
+              codesign --force --sign - "game/bin/${{ matrix.lib_name }}"
+              ;;
+            linux)
+              cp sim/target/release/librama_sim.so "game/bin/${{ matrix.lib_name }}"
+              ;;
+            windows)
+              cp sim/target/release/rama_sim.dll "game/bin/${{ matrix.lib_name }}"
+              ;;
+          esac
+          ls -la game/bin/
+
+      - name: Cache Godot
+        id: cache-godot
+        uses: actions/cache@v4
+        with:
+          path: |
+            ${{ runner.temp }}/godot
+            ~/.local/share/godot/export_templates
+            ~/Library/Application Support/Godot/export_templates
+            ~/AppData/Roaming/Godot/export_templates
+          key: godot-${{ env.GODOT_VERSION }}-${{ matrix.platform }}
+
+      - name: Setup Godot
+        uses: chickensoft-games/setup-godot@v2
+        with:
+          version: ${{ env.GODOT_VERSION }}
+          include-templates: true
+
+      - name: Export ${{ matrix.platform }}
+        run: |
+          mkdir -p dist/${{ matrix.platform }}
+          case "${{ matrix.platform }}" in
+            macos)
+              OUT="dist/macos/RamaCycle.zip"
+              ;;
+            linux)
+              OUT="dist/linux/RamaCycle.x86_64"
+              ;;
+            windows)
+              OUT="dist/windows/RamaCycle.exe"
+              ;;
+          esac
+          godot --headless --path game --export-release "${{ matrix.preset }}" "$OUT"
+          ls -laR dist/
+
+      - name: Package artifact
+        run: |
+          mkdir -p package
+          case "${{ matrix.platform }}" in
+            macos)
+              cp dist/macos/RamaCycle.zip "package/${{ matrix.artifact }}"
+              ;;
+            linux)
+              (
+                cd dist/linux
+                zip -9 "../../package/${{ matrix.artifact }}" RamaCycle.x86_64 RamaCycle.x86_64.console 2>/dev/null \
+                  || zip -9 "../../package/${{ matrix.artifact }}" *
+              )
+              ;;
+            windows)
+              (
+                cd dist/windows
+                zip -9 "../../package/${{ matrix.artifact }}" RamaCycle.exe RamaCycle.console.exe 2>/dev/null \
+                  || 7z a -tzip "../../package/${{ matrix.artifact }}" ./*
+              )
+              ;;
+          esac
+          ls -la package/
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.platform }}
+          path: package/${{ matrix.artifact }}
+          if-no-files-found: error
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Flatten release files
+        run: |
+          mkdir -p release
+          find artifacts -type f -name '*.zip' -exec cp {} release/ \;
+          ls -la release/
+
+      - name: Resolve version
+        id: ver
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "tag=${{ inputs.version }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.ver.outputs.tag }}
+          name: RAMA CYCLE ${{ steps.ver.outputs.tag }}
+          body: |
+            Walk the inner surface of Kepler Drum — a rotating space habitat.
+
+            **Controls:** WASD move · mouse look · Space jump · Shift run · dig / install modules · Esc menu
+
+            ### Downloads
+            - **macOS** — `RamaCycle-macos.zip` (unzip and open the app; right-click → Open the first time)
+            - **Linux** — `RamaCycle-linux.zip`
+            - **Windows** — `RamaCycle-windows.zip`
+
+            Site: https://mhsenkow.github.io/ramen/
+          files: release/*
+          draft: false
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

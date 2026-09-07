@@ -1,0 +1,507 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>RAMA CYCLE — Kepler Drum</title>
+  <meta name="description" content="Walk the inner surface of a rotating space habitat. Mountains, caves, erosion-carved drainage — and towns overhead." />
+  <meta property="og:title" content="RAMA CYCLE" />
+  <meta property="og:description" content="The world you can stand in: Kepler Drum, 900 m radius × 6000 m long." />
+  <meta property="og:image" content="media/03_lookup.jpg" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet" />
+  <style>
+    :root {
+      --void: #07090d;
+      --ink: #e8ece6;
+      --muted: #9aa39a;
+      --sun: #e6c46a;
+      --sun-dim: #b8923d;
+      --habitat: #3d6b5c;
+      --line: rgba(232, 236, 230, 0.12);
+      --ease: cubic-bezier(0.22, 1, 0.36, 1);
+    }
+
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    html { scroll-behavior: smooth; }
+
+    body {
+      font-family: "IBM Plex Sans", system-ui, sans-serif;
+      background: var(--void);
+      color: var(--ink);
+      line-height: 1.5;
+      overflow-x: hidden;
+    }
+
+    a { color: inherit; text-decoration: none; }
+
+    .hero {
+      position: relative;
+      min-height: 100svh;
+      display: grid;
+      align-items: end;
+      isolation: isolate;
+    }
+
+    .hero__media {
+      position: absolute;
+      inset: 0;
+      z-index: -2;
+      overflow: hidden;
+    }
+
+    .hero__media img {
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+      object-position: center 40%;
+      transform: scale(1.04);
+      animation: drift 28s var(--ease) infinite alternate;
+    }
+
+    .hero__veil {
+      position: absolute;
+      inset: 0;
+      z-index: -1;
+      background:
+        linear-gradient(180deg, rgba(7, 9, 13, 0.15) 0%, rgba(7, 9, 13, 0.35) 45%, rgba(7, 9, 13, 0.92) 100%),
+        radial-gradient(ellipse 80% 50% at 50% 20%, rgba(230, 196, 106, 0.12), transparent 60%);
+    }
+
+    .hero__content {
+      width: min(1120px, calc(100% - 2.5rem));
+      margin: 0 auto;
+      padding: 0 0 4.5rem;
+      display: grid;
+      gap: 1.25rem;
+      animation: rise 1.1s var(--ease) both;
+    }
+
+    .brand {
+      font-family: "Instrument Serif", Georgia, serif;
+      font-size: clamp(3.4rem, 9vw, 7rem);
+      font-weight: 400;
+      letter-spacing: -0.03em;
+      line-height: 0.92;
+      text-wrap: balance;
+    }
+
+    .brand em {
+      font-style: italic;
+      color: var(--sun);
+    }
+
+    .lede {
+      max-width: 34rem;
+      color: var(--muted);
+      font-size: clamp(1.05rem, 2vw, 1.2rem);
+      animation: rise 1.1s var(--ease) 0.12s both;
+    }
+
+    .cta {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.75rem;
+      margin-top: 0.5rem;
+      animation: rise 1.1s var(--ease) 0.22s both;
+    }
+
+    .btn {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 0.5rem;
+      min-height: 2.85rem;
+      padding: 0.7rem 1.25rem;
+      border: 1px solid transparent;
+      font: inherit;
+      font-weight: 500;
+      font-size: 0.95rem;
+      cursor: pointer;
+      transition: transform 0.35s var(--ease), background 0.35s var(--ease), border-color 0.35s var(--ease);
+    }
+
+    .btn:hover { transform: translateY(-2px); }
+    .btn:active { transform: translateY(0); }
+
+    .btn--primary {
+      background: var(--sun);
+      color: #1a1408;
+    }
+
+    .btn--primary:hover { background: #f0d486; }
+
+    .btn--ghost {
+      border-color: var(--line);
+      background: rgba(7, 9, 13, 0.35);
+      backdrop-filter: blur(8px);
+      color: var(--ink);
+    }
+
+    .btn--ghost:hover { border-color: rgba(230, 196, 106, 0.45); }
+
+    .btn[aria-disabled="true"] {
+      opacity: 0.45;
+      pointer-events: none;
+    }
+
+    .meta {
+      color: var(--muted);
+      font-size: 0.85rem;
+      letter-spacing: 0.02em;
+      animation: rise 1.1s var(--ease) 0.32s both;
+    }
+
+    .meta a { color: var(--sun-dim); border-bottom: 1px solid transparent; }
+    .meta a:hover { border-bottom-color: var(--sun-dim); }
+
+    section {
+      width: min(1120px, calc(100% - 2.5rem));
+      margin: 0 auto;
+      padding: 5rem 0;
+    }
+
+    .section-title {
+      font-family: "Instrument Serif", Georgia, serif;
+      font-size: clamp(2rem, 4vw, 3rem);
+      letter-spacing: -0.02em;
+      margin-bottom: 0.75rem;
+    }
+
+    .section-copy {
+      max-width: 36rem;
+      color: var(--muted);
+      margin-bottom: 2rem;
+    }
+
+    .downloads {
+      display: grid;
+      gap: 0.85rem;
+    }
+
+    .download {
+      display: grid;
+      grid-template-columns: 1fr auto;
+      gap: 1rem;
+      align-items: center;
+      padding: 1.15rem 1.25rem;
+      border-top: 1px solid var(--line);
+      transition: background 0.35s var(--ease);
+    }
+
+    .download:last-child { border-bottom: 1px solid var(--line); }
+    .download:hover { background: rgba(230, 196, 106, 0.04); }
+
+    .download h3 {
+      font-size: 1.05rem;
+      font-weight: 500;
+    }
+
+    .download p {
+      color: var(--muted);
+      font-size: 0.9rem;
+      margin-top: 0.2rem;
+    }
+
+    .gallery {
+      display: grid;
+      grid-template-columns: 1.4fr 1fr;
+      gap: 0.75rem;
+    }
+
+    .gallery figure {
+      position: relative;
+      overflow: hidden;
+      background: #10141a;
+      aspect-ratio: 16 / 10;
+      opacity: 0;
+      transform: translateY(18px);
+      transition: opacity 0.8s var(--ease), transform 0.8s var(--ease);
+    }
+
+    .gallery figure.is-in {
+      opacity: 1;
+      transform: none;
+    }
+
+    .gallery figure:first-child {
+      grid-row: span 2;
+      aspect-ratio: auto;
+      min-height: 100%;
+    }
+
+    .gallery img {
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+      transition: transform 1.2s var(--ease);
+    }
+
+    .gallery figure:hover img { transform: scale(1.03); }
+
+    .gallery figcaption {
+      position: absolute;
+      left: 0;
+      right: 0;
+      bottom: 0;
+      padding: 1rem;
+      font-size: 0.8rem;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+      color: rgba(232, 236, 230, 0.8);
+      background: linear-gradient(transparent, rgba(7, 9, 13, 0.75));
+    }
+
+    .facts {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 1.5rem;
+      border-top: 1px solid var(--line);
+      padding-top: 2rem;
+    }
+
+    .facts dt {
+      font-size: 0.75rem;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+      color: var(--sun-dim);
+      margin-bottom: 0.35rem;
+    }
+
+    .facts dd {
+      font-family: "Instrument Serif", Georgia, serif;
+      font-size: clamp(1.4rem, 2.5vw, 1.85rem);
+      letter-spacing: -0.02em;
+    }
+
+    footer {
+      width: min(1120px, calc(100% - 2.5rem));
+      margin: 0 auto;
+      padding: 2rem 0 3rem;
+      border-top: 1px solid var(--line);
+      color: var(--muted);
+      font-size: 0.9rem;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 1rem;
+      justify-content: space-between;
+    }
+
+    footer a:hover { color: var(--sun); }
+
+    @keyframes rise {
+      from { opacity: 0; transform: translateY(22px); }
+      to { opacity: 1; transform: none; }
+    }
+
+    @keyframes drift {
+      from { transform: scale(1.04) translate3d(0, 0, 0); }
+      to { transform: scale(1.08) translate3d(0, -1.5%, 0); }
+    }
+
+    @media (max-width: 800px) {
+      .gallery { grid-template-columns: 1fr; }
+      .gallery figure:first-child {
+        grid-row: auto;
+        aspect-ratio: 16 / 10;
+        min-height: 0;
+      }
+      .facts { grid-template-columns: 1fr; gap: 1.25rem; }
+      .download { grid-template-columns: 1fr; }
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      *, *::before, *::after {
+        animation: none !important;
+        transition: none !important;
+      }
+      .hero__media img { transform: none; }
+    }
+  </style>
+</head>
+<body>
+  <header class="hero">
+    <div class="hero__media" aria-hidden="true">
+      <img src="media/03_lookup.jpg" alt="" width="1600" height="900" fetchpriority="high" />
+    </div>
+    <div class="hero__veil" aria-hidden="true"></div>
+    <div class="hero__content">
+      <h1 class="brand">RAMA <em>CYCLE</em></h1>
+      <p class="lede">
+        The world you can stand in: the inner surface of Kepler Drum —
+        mountains, caves, and drainage under a sun that never sets the same way twice.
+      </p>
+      <div class="cta">
+        <a class="btn btn--primary" id="btn-latest" href="#download">Download builds</a>
+        <a class="btn btn--ghost" href="https://github.com/mhsenkow/ramen" id="btn-source">Source on GitHub</a>
+      </div>
+      <p class="meta">MVP-0 · Godot 4.6 + Rust sim · <a href="https://github.com/mhsenkow/ramen/releases">release notes</a></p>
+    </div>
+  </header>
+
+  <section id="download" aria-labelledby="download-title">
+    <h2 class="section-title" id="download-title">Download</h2>
+    <p class="section-copy">
+      Prebuilt builds for macOS, Linux, and Windows. First launch on macOS may need
+      right-click → Open. Requires a GPU that can run Godot 4 Forward+.
+    </p>
+    <div class="downloads" id="download-list">
+      <div class="download">
+        <div>
+          <h3>macOS</h3>
+          <p id="mac-status">Checking latest release…</p>
+        </div>
+        <a class="btn btn--primary" id="dl-mac" aria-disabled="true" href="#">macOS</a>
+      </div>
+      <div class="download">
+        <div>
+          <h3>Linux</h3>
+          <p id="linux-status">Checking latest release…</p>
+        </div>
+        <a class="btn btn--ghost" id="dl-linux" aria-disabled="true" href="#">Linux</a>
+      </div>
+      <div class="download">
+        <div>
+          <h3>Windows</h3>
+          <p id="win-status">Checking latest release…</p>
+        </div>
+        <a class="btn btn--ghost" id="dl-win" aria-disabled="true" href="#">Windows</a>
+      </div>
+    </div>
+  </section>
+
+  <section aria-labelledby="look-title">
+    <h2 class="section-title" id="look-title">Inside the drum</h2>
+    <p class="section-copy">
+      Wake outside the homestead, dig regolith, level plots, and look up —
+      the other side of the world is always overhead.
+    </p>
+    <div class="gallery">
+      <figure>
+        <img src="media/01_wake.jpg" alt="Waking outside the homestead on grassland" loading="lazy" width="1600" height="900" />
+        <figcaption>Wake</figcaption>
+      </figure>
+      <figure>
+        <img src="media/04_along.jpg" alt="Looking along the length of the drum" loading="lazy" width="1600" height="900" />
+        <figcaption>Along the axis</figcaption>
+      </figure>
+      <figure>
+        <img src="media/06_mined.jpg" alt="Excavated terrain with brush tools" loading="lazy" width="1600" height="900" />
+        <figcaption>Excavate</figcaption>
+      </figure>
+      <figure>
+        <img src="media/08_drum.jpg" alt="Full drum overview" loading="lazy" width="1600" height="900" />
+        <figcaption>Kepler Drum</figcaption>
+      </figure>
+      <figure>
+        <img src="media/09_map.jpg" alt="Plan-view drainage map" loading="lazy" width="1600" height="900" />
+        <figcaption>Drainage map</figcaption>
+      </figure>
+    </div>
+  </section>
+
+  <section aria-labelledby="spec-title">
+    <h2 class="section-title" id="spec-title">Habitat</h2>
+    <p class="section-copy">
+      One continuous ground: walk far enough and you return to where you started.
+    </p>
+    <dl class="facts">
+      <div>
+        <dt>Radius</dt>
+        <dd>900 m</dd>
+      </div>
+      <div>
+        <dt>Length</dt>
+        <dd>6,000 m</dd>
+      </div>
+      <div>
+        <dt>Lap</dt>
+        <dd>~9 min run</dd>
+      </div>
+    </dl>
+  </section>
+
+  <footer>
+    <span>RAMA CYCLE · sleeping ox</span>
+    <span>
+      <a href="https://github.com/mhsenkow/ramen">GitHub</a>
+      ·
+      <a href="https://github.com/mhsenkow/ramen/releases">Releases</a>
+    </span>
+  </footer>
+
+  <script>
+    const REPO = "mhsenkow/ramen";
+    const ASSETS = {
+      mac: { id: "dl-mac", status: "mac-status", match: /macos/i, label: "macOS build" },
+      linux: { id: "dl-linux", status: "linux-status", match: /linux/i, label: "Linux build" },
+      win: { id: "dl-win", status: "win-status", match: /windows/i, label: "Windows build" },
+    };
+
+    function wire(btn, statusEl, asset, tag) {
+      btn.href = asset.browser_download_url;
+      btn.removeAttribute("aria-disabled");
+      const mb = (asset.size / (1024 * 1024)).toFixed(1);
+      statusEl.textContent = `${tag} · ${mb} MB`;
+    }
+
+    function fallback() {
+      const releases = `https://github.com/${REPO}/releases`;
+      Object.values(ASSETS).forEach(({ id, status }) => {
+        const btn = document.getElementById(id);
+        const statusEl = document.getElementById(status);
+        btn.href = releases;
+        btn.removeAttribute("aria-disabled");
+        statusEl.textContent = "Open releases on GitHub";
+      });
+    }
+
+    async function loadLatest() {
+      try {
+        const res = await fetch(`https://api.github.com/repos/${REPO}/releases/latest`);
+        if (!res.ok) throw new Error(String(res.status));
+        const data = await res.json();
+        const tag = data.tag_name || "latest";
+        let found = 0;
+        for (const key of Object.keys(ASSETS)) {
+          const conf = ASSETS[key];
+          const asset = (data.assets || []).find((a) => conf.match.test(a.name));
+          const btn = document.getElementById(conf.id);
+          const statusEl = document.getElementById(conf.status);
+          if (asset) {
+            wire(btn, statusEl, asset, tag);
+            found += 1;
+          } else {
+            statusEl.textContent = "Not in latest release yet";
+            btn.href = data.html_url || `https://github.com/${REPO}/releases`;
+            btn.removeAttribute("aria-disabled");
+          }
+        }
+        if (found === 0) fallback();
+      } catch (_) {
+        fallback();
+      }
+    }
+
+    const io = new IntersectionObserver(
+      (entries) => {
+        entries.forEach((e) => {
+          if (e.isIntersecting) {
+            e.target.classList.add("is-in");
+            io.unobserve(e.target);
+          }
+        });
+      },
+      { threshold: 0.15 }
+    );
+    document.querySelectorAll(".gallery figure").forEach((fig, i) => {
+      fig.style.transitionDelay = `${i * 80}ms`;
+      io.observe(fig);
+    });
+
+    loadLatest();
+  </script>
+</body>
+</html>

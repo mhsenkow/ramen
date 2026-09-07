@@ -1,0 +1,33 @@
+# Rust
+sim/target/
+
+# Godot
+game/.godot/
+game/android/
+**/*.translation
+
+# Built native libs (CI / build.sh produce these)
+game/bin/*.dylib
+game/bin/*.so
+game/bin/*.dll
+game/bin/*.wasm
+
+# Local exports
+dist/
+build/
+*.app
+*.dmg
+*.x86_64
+*.exe
+*.zip
+!site/**
+
+# OS / editor
+.DS_Store
+*.swp
+*~
+.idea/
+.vscode/
+*.user
+.env
+.env.*

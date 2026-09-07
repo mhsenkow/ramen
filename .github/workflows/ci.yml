@@ -1,0 +1,29 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  sim:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: sim
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Unit tests (nitrogen gate + pooling)
+        run: cargo test --lib --release -- --nocapture
+
+  # Codesign path lives on macOS (build.sh). Keep the Rust gate green here too.
+  sim-macos:
+    runs-on: macos-latest
+    defaults:
+      run:
+        working-directory: sim
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Unit tests on macOS
+        run: cargo test --lib --release -- --nocapture

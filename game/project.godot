@@ -1,0 +1,30 @@
+; Engine configuration file.
+; It's best edited using the editor UI and not directly,
+; since the parameters that go here are not all obvious.
+;
+; Format:
+;   [section] ; section goes between []
+;   param=value ; assign values to parameters
+
+config_version=5
+
+[application]
+
+config/name="RAMA CYCLE — MVP-0"
+run/main_scene="res://main.tscn"
+config/features=PackedStringArray("4.6", "Forward Plus")
+
+[debug]
+
+gdscript/warnings/inference_on_variant=1
+
+[display]
+
+window/size/viewport_width=1600
+window/size/viewport_height=900
+
+[rendering]
+
+textures/vram_compression/import_etc2_astc=true
+anti_aliasing/quality/msaa_3d=2
+environment/defaults/default_clear_color=Color(0.02, 0.025, 0.035, 1)

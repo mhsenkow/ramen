@@ -1,0 +1,237 @@
+# Material recipes — LANDSCAPE_1400 items 831–832, 839–855, 869–871.
+# Inputs and outputs are kilograms. Mass must balance (gas_loss counts).
+# o2_kg / co2_kg are atmosphere ledger deltas per full batch (item 843).
+
+[[recipe]]
+id = "crush_rock"
+station = "crusher"
+energy_kj = 40.0
+time_s = 8.0
+o2_kg = 0.0
+co2_kg = 0.0
+inputs = [{ material = "sandstone", mass_kg = 10.0 }]
+outputs = [
+  { material = "gravel", mass_kg = 9.4 },
+  { material = "dust", mass_kg = 0.6 },
+]
+
+[[recipe]]
+id = "mill_sand"
+station = "crusher"
+energy_kj = 30.0
+time_s = 10.0
+o2_kg = 0.0
+co2_kg = 0.0
+inputs = [{ material = "gravel", mass_kg = 8.0 }]
+outputs = [
+  { material = "sand", mass_kg = 7.5 },
+  { material = "dust", mass_kg = 0.5 },
+]
+
+[[recipe]]
+id = "charcoal_kiln"
+station = "kiln"
+energy_kj = 20.0
+time_s = 90.0
+o2_kg = 1.2
+co2_kg = 2.8
+inputs = [{ material = "timber", mass_kg = 10.0 }]
+outputs = [
+  { material = "charcoal", mass_kg = 2.5 },
+  { material = "gas_loss", mass_kg = 7.5 },
+]
+
+[[recipe]]
+id = "fire_clay"
+station = "kiln"
+energy_kj = 120.0
+time_s = 45.0
+o2_kg = 2.5
+co2_kg = 3.4
+inputs = [
+  { material = "clay", mass_kg = 8.0 },
+  { material = "charcoal", mass_kg = 1.5 },
+]
+outputs = [
+  { material = "ceramic", mass_kg = 7.2 },
+  { material = "ash", mass_kg = 0.4 },
+  { material = "gas_loss", mass_kg = 1.9 },
+]
+
+[[recipe]]
+id = "smelt_ferrous"
+station = "smelter"
+energy_kj = 800.0
+time_s = 120.0
+o2_kg = 8.0
+co2_kg = 11.0
+inputs = [
+  { material = "ferrous ore", mass_kg = 20.0 },
+  { material = "charcoal", mass_kg = 5.0 },
+]
+outputs = [
+  { material = "iron", mass_kg = 8.0 },
+  { material = "slag", mass_kg = 12.5 },
+  { material = "gas_loss", mass_kg = 4.5 },
+]
+
+[[recipe]]
+id = "burn_lime"
+station = "kiln"
+energy_kj = 200.0
+time_s = 60.0
+o2_kg = 3.0
+co2_kg = 5.5
+inputs = [
+  { material = "sediment", mass_kg = 10.0 },
+  { material = "charcoal", mass_kg = 2.0 },
+]
+outputs = [
+  { material = "lime", mass_kg = 5.6 },
+  { material = "gas_loss", mass_kg = 6.4 },
+]
+
+[[recipe]]
+id = "melt_glass"
+station = "kiln"
+energy_kj = 400.0
+time_s = 90.0
+o2_kg = 4.0
+co2_kg = 5.5
+inputs = [
+  { material = "sand", mass_kg = 8.0 },
+  { material = "lime", mass_kg = 1.5 },
+  { material = "charcoal", mass_kg = 2.0 },
+]
+outputs = [
+  { material = "glass", mass_kg = 8.8 },
+  { material = "ash", mass_kg = 0.5 },
+  { material = "gas_loss", mass_kg = 2.2 },
+]
+
+[[recipe]]
+id = "compost_greens"
+station = "compost"
+energy_kj = 0.0
+time_s = 30.0
+o2_kg = 0.4
+co2_kg = 0.55
+inputs = [{ material = "greens", mass_kg = 5.0 }]
+outputs = [
+  { material = "manure", mass_kg = 3.8 },
+  { material = "gas_loss", mass_kg = 1.2 },
+]
+
+[[recipe]]
+id = "bone_meal_mix"
+station = "mill"
+energy_kj = 10.0
+time_s = 15.0
+o2_kg = 0.0
+co2_kg = 0.0
+inputs = [
+  { material = "seed", mass_kg = 2.0 },
+  { material = "ash", mass_kg = 1.0 },
+]
+outputs = [{ material = "bone meal", mass_kg = 3.0 }]
+
+[[recipe]]
+id = "mill_flour"
+station = "kitchen"
+energy_kj = 15.0
+time_s = 20.0
+o2_kg = 0.0
+co2_kg = 0.0
+inputs = [{ material = "seed", mass_kg = 4.0 }]
+outputs = [
+  { material = "flour", mass_kg = 3.6 },
+  { material = "dust", mass_kg = 0.4 },
+]
+
+[[recipe]]
+id = "press_oil"
+station = "kitchen"
+energy_kj = 10.0
+time_s = 25.0
+o2_kg = 0.0
+co2_kg = 0.0
+inputs = [{ material = "seed", mass_kg = 5.0 }]
+outputs = [
+  { material = "oil", mass_kg = 1.5 },
+  { material = "manure", mass_kg = 3.5 },
+]
+
+[[recipe]]
+id = "simmer_broth"
+station = "kitchen"
+energy_kj = 40.0
+time_s = 60.0
+o2_kg = 0.3
+co2_kg = 0.4
+inputs = [
+  { material = "greens", mass_kg = 3.0 },
+  { material = "bone meal", mass_kg = 1.0 },
+]
+outputs = [
+  { material = "broth", mass_kg = 3.5 },
+  { material = "gas_loss", mass_kg = 0.5 },
+]
+
+[[recipe]]
+id = "roll_noodles"
+station = "kitchen"
+energy_kj = 5.0
+time_s = 30.0
+o2_kg = 0.0
+co2_kg = 0.0
+inputs = [
+  { material = "flour", mass_kg = 3.0 },
+  { material = "oil", mass_kg = 0.2 },
+]
+outputs = [{ material = "noodles", mass_kg = 3.2 }]
+
+[[recipe]]
+id = "reduce_tare"
+station = "kitchen"
+energy_kj = 20.0
+time_s = 40.0
+o2_kg = 0.2
+co2_kg = 0.25
+inputs = [
+  { material = "greens", mass_kg = 2.0 },
+  { material = "ash", mass_kg = 0.3 },
+]
+outputs = [
+  { material = "tare", mass_kg = 1.8 },
+  { material = "gas_loss", mass_kg = 0.5 },
+]
+
+[[recipe]]
+id = "bowl_ramen"
+station = "kitchen"
+energy_kj = 25.0
+time_s = 15.0
+o2_kg = 0.1
+co2_kg = 0.1
+inputs = [
+  { material = "noodles", mass_kg = 1.5 },
+  { material = "broth", mass_kg = 2.0 },
+  { material = "greens", mass_kg = 0.5 },
+]
+outputs = [{ material = "ramen", mass_kg = 4.0 }]
+
+[[recipe]]
+id = "bowl_rich_ramen"
+station = "kitchen"
+energy_kj = 35.0
+time_s = 20.0
+o2_kg = 0.15
+co2_kg = 0.15
+inputs = [
+  { material = "noodles", mass_kg = 1.5 },
+  { material = "broth", mass_kg = 2.0 },
+  { material = "greens", mass_kg = 0.8 },
+  { material = "oil", mass_kg = 0.3 },
+  { material = "tare", mass_kg = 0.4 },
+]
+outputs = [{ material = "rich ramen", mass_kg = 5.0 }]
