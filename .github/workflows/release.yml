@@ -86,8 +86,18 @@ jobs:
           OUT_DIR="${GITHUB_WORKSPACE}/dist/${{ matrix.platform }}"
           mkdir -p "$OUT_DIR"
           OUT="${OUT_DIR}/${{ matrix.out_name }}"
+          set +e
           godot --headless --path game --export-release "${{ matrix.preset }}" "$OUT"
-          ls -laR "${GITHUB_WORKSPACE}/dist/"
+          status=$?
+          set -e
+          ls -laR "${GITHUB_WORKSPACE}/dist/" || true
+          # Godot 4.6 sometimes SIGSEGVs on exit after a successful GDExtension export.
+          if [ -f "$OUT" ] || [ -f "${OUT}.zip" ] || compgen -G "${OUT_DIR}/*" > /dev/null; then
+            echo "Export artifacts present (godot exit=${status})"
+            exit 0
+          fi
+          echo "Export produced no artifacts (godot exit=${status})"
+          exit 1
 
       - name: Package artifact
         run: |
