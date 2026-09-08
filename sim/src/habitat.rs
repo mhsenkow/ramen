@@ -26,7 +26,8 @@ impl Habitat {
             radius,
             length: 6000.0,
             omega: (target_g / radius).sqrt(),
-            max_elevation: 235.0,
+            // LANDSCAPE_4200: ~440 m peaks; summit g ≈ 0.5 × hull (documented).
+            max_elevation: 440.0,
             water_level: 22.0,
             seed: 0x5A1D_0C0A,
         }
@@ -34,13 +35,19 @@ impl Habitat {
 
     /// Gravity magnitude at radius r (m/s^2). Zero at the axis, max at the hull.
     #[inline]
-    pub fn gravity_at(&self, r: f32) -> f32 { self.omega * self.omega * r }
+    pub fn gravity_at(&self, r: f32) -> f32 {
+        self.omega * self.omega * r
+    }
 
     /// Surface gravity — what the player feels standing on the ground.
-    pub fn surface_gravity(&self) -> f32 { self.gravity_at(self.radius) }
+    pub fn surface_gravity(&self) -> f32 {
+        self.gravity_at(self.radius)
+    }
 
     /// One rotation, seconds.
-    pub fn spin_period(&self) -> f32 { std::f32::consts::TAU / self.omega }
+    pub fn spin_period(&self) -> f32 {
+        std::f32::consts::TAU / self.omega
+    }
 
     /// Cylindrical (theta, z, r) -> world (x, y, z). Axis is world Z.
     #[inline]

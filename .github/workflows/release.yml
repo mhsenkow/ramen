@@ -35,6 +35,18 @@ jobs:
             lib_name: librama_sim.so
             artifact: RamaCycle-linux.zip
             out_name: RamaCycle.x86_64
+          - os: ubuntu-latest
+            platform: deck
+            preset: Steam Deck (Linux)
+            lib_name: librama_sim.so
+            artifact: RamaCycle-deck.zip
+            out_name: RamaCycle.x86_64
+          - os: ubuntu-latest
+            platform: lowspec
+            preset: Low Spec (Linux)
+            lib_name: librama_sim.so
+            artifact: RamaCycle-lowspec.zip
+            out_name: RamaCycle.x86_64
           - os: windows-latest
             platform: windows
             preset: Windows Desktop
@@ -65,7 +77,7 @@ jobs:
               cp sim/target/release/librama_sim.dylib "game/bin/${{ matrix.lib_name }}"
               codesign --force --sign - "game/bin/${{ matrix.lib_name }}"
               ;;
-            linux)
+            linux|deck|lowspec)
               cp sim/target/release/librama_sim.so "game/bin/${{ matrix.lib_name }}"
               ;;
             windows)
@@ -106,9 +118,9 @@ jobs:
             macos)
               cp "dist/macos/${{ matrix.out_name }}" "package/${{ matrix.artifact }}"
               ;;
-            linux)
+            linux|deck|lowspec)
               (
-                cd dist/linux
+                cd "dist/${{ matrix.platform }}"
                 zip -9 "../../package/${{ matrix.artifact }}" *
               )
               ;;
@@ -173,8 +185,10 @@ jobs:
 
             ### Downloads
             - **macOS** — `RamaCycle-macos.zip` (unzip → right-click → Open the first time)
-            - **Linux** — `RamaCycle-linux.zip`
             - **Windows** — `RamaCycle-windows.zip`
+            - **Linux** — `RamaCycle-linux.zip`
+            - **Steam Deck** — `RamaCycle-deck.zip` (Linux + `deck`/`lowspec` quality defaults)
+            - **Low Spec** — `RamaCycle-lowspec.zip` (Linux, foliage/LOD cut)
 
             Site: https://mhsenkow.github.io/ramen/
           files: release/*

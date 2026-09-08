@@ -13,7 +13,9 @@ pub const ST: usize = 768;
 pub const SZ: usize = 512;
 
 #[inline]
-pub fn idx(t: usize, z: usize) -> usize { t + z * ST }
+pub fn idx(t: usize, z: usize) -> usize {
+    t + z * ST
+}
 
 #[derive(Clone, Copy, Debug, Default)]
 pub struct SoilSample {
@@ -78,9 +80,37 @@ impl Soil {
                 soil.p[i] = 0.12 + 0.55 * basalt + 0.10 * f;
                 soil.k[i] = 0.15 + 0.50 * basalt + 0.12 * f;
                 soil.organic[i] = (0.05 + 0.55 * f).clamp(0.0, 1.0);
-                soil.moisture[i] = (0.15 + 0.70 * f).clamp(0.05, 1.0);
+                // Moisture from drainage × climate (not flux alone). LANDSCAPE_4200 §BQ.
+                let theta = ti as f32 / NT as f32 * std::f32::consts::TAU;
+                let z_m = (zi as f32 / NZ as f32 - 0.5) * hab.length;
+                let arid = {
+                    let p = crate::province::province_at(&hab, theta, z_m);
+                    let a0 = match crate::province::climate_intent(p.primary) {
+                        0 => 0.78,
+                        1 => 0.38,
+                        2 => 0.18,
+                        3 => 0.12,
+                        _ => 0.4,
+                    };
+                    let a1 = match crate::province::climate_intent(p.secondary) {
+                        0 => 0.78,
+                        1 => 0.38,
+                        2 => 0.18,
+                        3 => 0.12,
+                        _ => 0.4,
+                    };
+                    p.blend2(a0, a1)
+                };
+                let rain_proxy = (1.0 - arid) * 0.85;
+                soil.moisture[i] =
+                    (0.10 + 0.40 * f + 0.45 * rain_proxy - 0.15 * arid).clamp(0.04, 1.0);
+                // Shore / sea floor wet.
+                if e < hab.water_level + 1.5 {
+                    soil.moisture[i] = soil.moisture[i].max(0.75);
+                }
                 soil.ph[i] = 6.5 + (noise - 0.5) * 0.35;
-                soil.microbes[i] = (0.20 + 0.40 * soil.organic[i] * soil.moisture[i]).clamp(0.0, 1.0);
+                soil.microbes[i] =
+                    (0.20 + 0.40 * soil.organic[i] * soil.moisture[i]).clamp(0.0, 1.0);
             }
         }
         soil
@@ -170,12 +200,10 @@ impl Soil {
                 self.n[i] = (self.n[i] + effect.n * per * w).clamp(0.0, 1.5);
                 self.p[i] = (self.p[i] + effect.p * per * w).clamp(0.0, 1.5);
                 self.k[i] = (self.k[i] + effect.k * per * w).clamp(0.0, 1.5);
-                self.organic[i] =
-                    (self.organic[i] + effect.organic * per * w).clamp(0.0, 1.5);
+                self.organic[i] = (self.organic[i] + effect.organic * per * w).clamp(0.0, 1.5);
                 self.ph[i] = (self.ph[i] + effect.ph * per * w).clamp(4.5, 9.0);
-                self.microbes[i] = (self.microbes[i]
-                    + effect.organic * per * w * 0.35)
-                    .clamp(0.0, 1.0);
+                self.microbes[i] =
+                    (self.microbes[i] + effect.organic * per * w * 0.35).clamp(0.0, 1.0);
             }
         }
         true
@@ -186,7 +214,9 @@ impl Soil {
     pub fn tick(&mut self, dt_days: f32, elev: &[f32], flux: &[f32], rainfall_map: &[f32]) {
         let _ = flux; // reserved for permeability weighting later
         let dt = dt_days.max(0.0);
-        if dt <= 0.0 { return; }
+        if dt <= 0.0 {
+            return;
+        }
 
         let mut rain = vec![0.0f32; ST * SZ];
         if rainfall_map.len() == ST * SZ {
@@ -207,7 +237,7 @@ impl Soil {
         // Lateral moisture + N along elevation gradient (downslope).
         let mut m_next = self.moisture.clone();
         let mut n_next = self.n.clone();
-        let evap = 0.04 * dt;
+        let evap_base = 0.045 * dt;
         let leach_rate = 0.08 * dt;
 
         for sz in 0..SZ {
@@ -215,8 +245,11 @@ impl Soil {
                 let i = idx(st, sz);
                 let e = elev_at(elev, st, sz);
                 let mut m = self.moisture[i];
-                m += rain[i] * dt;
-                m = (m - evap * (0.5 + 0.5 * m)).clamp(0.02, 1.0);
+                // Rain already carries province/orographic scale from weather.
+                m += rain[i] * dt * 1.15;
+                // Dry cells (little recent rain) evaporate faster — rain-shadow scrub.
+                let dry = if rain[i] < 0.04 { 1.45 } else if rain[i] < 0.12 { 1.15 } else { 0.92 };
+                m = (m - evap_base * dry * (0.45 + 0.55 * m)).clamp(0.02, 1.0);
 
                 // Neighbours: theta wraps, z clamps.
                 let nbrs: [(i32, i32); 4] = [(-1, 0), (1, 0), (0, -1), (0, 1)];
@@ -273,8 +306,10 @@ fn sample_field(f: &[f32], x: f32, y: f32) -> f32 {
     let (fx, fy) = (x - x0 as f32, y - y0 as f32);
     let x1 = (x0 + 1) % ST;
     let y1 = (y0 + 1).min(SZ - 1);
-    let a = f[idx(x0, y0)]; let b = f[idx(x1, y0)];
-    let c = f[idx(x0, y1)]; let d = f[idx(x1, y1)];
+    let a = f[idx(x0, y0)];
+    let b = f[idx(x1, y0)];
+    let c = f[idx(x0, y1)];
+    let d = f[idx(x1, y1)];
     let t = a + (b - a) * fx;
     let u = c + (d - c) * fx;
     t + (u - t) * fy
@@ -287,8 +322,10 @@ fn sample_rect(f: &[f32], wt: usize, wz: usize, x: f32, y: f32) -> f32 {
     let (fx, fy) = (x - x0 as f32, y - y0 as f32);
     let x1 = (x0 + 1) % wt;
     let y1 = (y0 + 1).min(wz - 1);
-    let a = f[x0 + y0 * wt]; let b = f[x1 + y0 * wt];
-    let c = f[x0 + y1 * wt]; let d = f[x1 + y1 * wt];
+    let a = f[x0 + y0 * wt];
+    let b = f[x1 + y0 * wt];
+    let c = f[x0 + y1 * wt];
+    let d = f[x1 + y1 * wt];
     let t = a + (b - a) * fx;
     let u = c + (d - c) * fx;
     t + (u - t) * fy

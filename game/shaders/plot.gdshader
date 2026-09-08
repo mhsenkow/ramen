@@ -18,8 +18,14 @@ void vertex() {
 
 void fragment() {
     float dist = length(w_pos - CAMERA_POSITION_WORLD);
+    // feature: claim ring readable ~8–120 m
+    //
+    // It used to carry to 220 m, and at that range a 40 m claim on a hillside
+    // is a green veil across half the valley — the picture repainted by a UI
+    // affordance. The RING is what says "someone's ground"; the fill only has
+    // to whisper.
     float near = smoothstep(8.0, 28.0, dist);
-    float far = 1.0 - smoothstep(90.0, 220.0, dist);
+    float far = 1.0 - smoothstep(45.0, 120.0, dist); // feature: claim ring 45-120 m
     float range = near * far;
     if (range < 0.02) {
         discard;
@@ -28,7 +34,7 @@ void fragment() {
     float r = clamp(v_radial, 0.0, 1.2);
     float fill = smoothstep(0.0, 0.55, r) * (1.0 - smoothstep(0.72, 1.02, r));
     float rim = smoothstep(0.78, 0.90, r) * (1.0 - smoothstep(0.96, 1.05, r));
-    float mask = fill * 0.35 + rim * 1.0;
+    float mask = fill * 0.10 + rim * 1.0;
     if (mask < 0.02) {
         discard;
     }

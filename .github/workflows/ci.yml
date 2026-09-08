@@ -5,6 +5,22 @@ on:
   pull_request:
 
 jobs:
+  craft-gates:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Shared shader includes (§2002)
+        run: python3 tools/check_shader_includes.py
+      - name: Shader metre literals (§2008)
+        run: python3 tools/check_shader_literals.py
+      - name: MultiMesh colour init (§2010)
+        run: python3 tools/check_multimesh_init.py
+      - name: HUD contrast (§2105)
+        run: python3 tools/check_ui_contrast.py
+
   sim:
     runs-on: ubuntu-latest
     defaults:

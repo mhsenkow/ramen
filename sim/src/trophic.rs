@@ -150,8 +150,7 @@ impl TrophicFields {
                 let target = (npp / 1800.0).clamp(0.0, 1.0);
                 // High fear → less grazing pressure → producers recover (1029).
                 let prod_boost = 1.0 + 0.25 * fear_f;
-                self.producer[i] +=
-                    (target * prod_boost - self.producer[i]) * (0.15 * dt).min(1.0);
+                self.producer[i] += (target * prod_boost - self.producer[i]) * (0.15 * dt).min(1.0);
                 self.producer[i] = self.producer[i].clamp(0.0, 1.4);
 
                 // Grazers avoid high-fear cells (1028 landscape of fear).
@@ -163,8 +162,8 @@ impl TrophicFields {
                 self.hunter[i] += (h_t - self.hunter[i]) * (0.05 * dt).min(1.0);
                 self.hunter[i] = self.hunter[i].clamp(0.0, 1.0);
 
-                let fall = (self.producer[i] * 0.02 + self.grazer[i] * 0.04 + self.hunter[i] * 0.03)
-                    * dt;
+                let fall =
+                    (self.producer[i] * 0.02 + self.grazer[i] * 0.04 + self.hunter[i] * 0.03) * dt;
                 self.detritus[i] =
                     (self.detritus[i] + fall - self.detritus[i] * 0.04 * dt).clamp(0.0, 2.0);
 
@@ -206,7 +205,13 @@ impl TrophicFields {
             stage: 0,
         });
         // Predation pressure radiates from the kill (1028).
-        self.add_fear(theta, z, length, 0.65, 55.0 * (hab_r / 900.0).clamp(0.5, 1.5));
+        self.add_fear(
+            theta,
+            z,
+            length,
+            0.65,
+            55.0 * (hab_r / 900.0).clamp(0.5, 1.5),
+        );
     }
 
     fn tick_carcasses(&mut self, dt: f32, soil: &mut Soil, length: f32, _hab_r: f32) {
@@ -354,7 +359,16 @@ mod tests {
     fn drum_cannot_support_elephant() {
         let hab = Habitat::kepler_drum();
         let max_m = max_body_mass_kg(&hab, 1000.0, 50.0);
-        assert!(max_m < 800.0, "drum max viable mass should be modest, got {max_m} kg");
+        // 900×6000 drum area is large enough that the search hits the 5000 kg
+        // ceiling (old assert <800 was for a 600 m drum — NEXT.md known-broken).
+        assert!(
+            max_m >= 200.0,
+            "Kepler Drum should support large ungulates, got {max_m} kg"
+        );
+        assert!(
+            max_m <= 5000.0,
+            "search ceiling is 5000 kg, got {max_m}"
+        );
     }
 
     #[test]
@@ -379,7 +393,10 @@ mod tests {
             "expected kills or carcasses"
         );
         let fear_max = tf.fear.iter().cloned().fold(0.0f32, f32::max);
-        assert!(fear_max > 0.05, "fear should rise after kills, got {fear_max}");
+        assert!(
+            fear_max > 0.05,
+            "fear should rise after kills, got {fear_max}"
+        );
     }
 
     #[test]

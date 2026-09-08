@@ -22,6 +22,18 @@ build/
 *.zip
 !site/**
 
+# Debug / bisect dumps — keep numbered showcase stills only
+shots/iso_*/
+shots/iso_*
+shots/probe_*
+shots/diag_*
+shots/tap_*
+shots/term_*
+shots/sus_*
+shots/cov_*
+shots/nodepth.png
+shots/nofog.png
+
 # OS / editor
 .DS_Store
 *.swp

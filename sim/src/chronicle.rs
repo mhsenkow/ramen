@@ -16,7 +16,7 @@ pub enum EventKind {
     Place,
     Flood,
     Fire,
-    Help,   // agent/player helped another (Wave 2)
+    Help, // agent/player helped another (Wave 2)
     Eat,
     Rest,
     Talk,
@@ -264,14 +264,8 @@ impl Chronicle {
                 "You amended this ground on day {:.0}. The soil remembers.",
                 e.day
             ),
-            EventKind::Harvest => format!(
-                "You harvested here on day {:.0}. Good hands.",
-                e.day
-            ),
-            EventKind::Place => format!(
-                "You built something here on day {:.0}.",
-                e.day
-            ),
+            EventKind::Harvest => format!("You harvested here on day {:.0}. Good hands.", e.day),
+            EventKind::Place => format!("You built something here on day {:.0}.", e.day),
             _ => format!("{} (day {:.0})", e.label, e.day),
         })
     }

@@ -5,7 +5,7 @@
 //! lightweight particles that settle into columns — an SPH *idea* (discrete
 //! mass parcels), not a continuum SPH solve (impossible at drum scale).
 
-use crate::terrain::{NT, NZ, idx};
+use crate::terrain::{idx, NT, NZ};
 
 const N4: [(i32, i32); 4] = [(-1, 0), (1, 0), (0, -1), (0, 1)];
 const MAX_DEPTH: f32 = 28.0;
@@ -71,10 +71,14 @@ impl SurfaceWater {
         let mut donated = 0.0f32;
         for dz in -r..=r {
             let zz = zi as i32 + dz;
-            if zz < 1 || zz >= NZ as i32 - 1 { continue; }
+            if zz < 1 || zz >= NZ as i32 - 1 {
+                continue;
+            }
             for dt in -r..=r {
                 let dist = (dt.abs().max(dz.abs())) as i32;
-                if dist < 2 || dist > r { continue; }
+                if dist < 2 || dist > r {
+                    continue;
+                }
                 let tt = (ti as i32 + dt).rem_euclid(NT as i32) as usize;
                 let i = idx(tt, zz as usize);
                 let take = self.depth[i] * 0.45;
@@ -85,7 +89,9 @@ impl SurfaceWater {
         let mut beds: Vec<(usize, f32)> = Vec::new();
         for dz in -2..=2 {
             let zz = zi as i32 + dz;
-            if zz < 1 || zz >= NZ as i32 - 1 { continue; }
+            if zz < 1 || zz >= NZ as i32 - 1 {
+                continue;
+            }
             for dt in -2..=2 {
                 let tt = (ti as i32 + dt).rem_euclid(NT as i32) as usize;
                 let i = idx(tt, zz as usize);
@@ -107,7 +113,9 @@ impl SurfaceWater {
         for _ in 0..14 {
             for dz in -r..=r {
                 let zz = zi as i32 + dz;
-                if zz < 1 || zz >= NZ as i32 - 1 { continue; }
+                if zz < 1 || zz >= NZ as i32 - 1 {
+                    continue;
+                }
                 for dt in -r..=r {
                     let tt = (ti as i32 + dt).rem_euclid(NT as i32) as usize;
                     self.equalize_cell(elev, tt, zz as usize, 0.65);
@@ -132,7 +140,9 @@ impl SurfaceWater {
         let mut cells = Vec::new();
         for dz in -r..=r {
             let zz = zi as i32 + dz;
-            if zz < 1 || zz >= NZ as i32 - 1 { continue; }
+            if zz < 1 || zz >= NZ as i32 - 1 {
+                continue;
+            }
             for dt in -r..=r {
                 let tt = (ti as i32 + dt).rem_euclid(NT as i32) as usize;
                 let i = idx(tt, zz as usize);
@@ -141,14 +151,24 @@ impl SurfaceWater {
                 }
             }
         }
-        if cells.is_empty() || want_m3 <= 1e-6 { return 0.0; }
+        if cells.is_empty() || want_m3 <= 1e-6 {
+            return 0.0;
+        }
         let mut left = want_m3;
         let mut taken = 0.0f32;
         // Several passes so we drain evenly rather than emptying one cell.
         for _ in 0..6 {
-            if left <= 1e-6 { break; }
-            let wet: Vec<usize> = cells.iter().copied().filter(|&i| self.depth[i] >= 0.05).collect();
-            if wet.is_empty() { break; }
+            if left <= 1e-6 {
+                break;
+            }
+            let wet: Vec<usize> = cells
+                .iter()
+                .copied()
+                .filter(|&i| self.depth[i] >= 0.05)
+                .collect();
+            if wet.is_empty() {
+                break;
+            }
             let share = (left / (wet.len() as f32 * ca)).min(0.45);
             for i in wet {
                 let take_d = share.min(self.depth[i]);
@@ -162,7 +182,9 @@ impl SurfaceWater {
         for _ in 0..8 {
             for dz in -r..=r {
                 let zz = zi as i32 + dz;
-                if zz < 1 || zz >= NZ as i32 - 1 { continue; }
+                if zz < 1 || zz >= NZ as i32 - 1 {
+                    continue;
+                }
                 for dt in -r..=r {
                     let tt = (ti as i32 + dt).rem_euclid(NT as i32) as usize;
                     self.equalize_cell(elev, tt, zz as usize, 0.55);
@@ -184,18 +206,24 @@ impl SurfaceWater {
     ) -> f32 {
         let r = radius.max(1);
         let ca = cell_area.max(1e-4);
-        if add_m3 <= 1e-6 { return 0.0; }
+        if add_m3 <= 1e-6 {
+            return 0.0;
+        }
         let mut beds: Vec<(usize, f32)> = Vec::new();
         for dz in -r..=r {
             let zz = zi as i32 + dz;
-            if zz < 1 || zz >= NZ as i32 - 1 { continue; }
+            if zz < 1 || zz >= NZ as i32 - 1 {
+                continue;
+            }
             for dt in -r..=r {
                 let tt = (ti as i32 + dt).rem_euclid(NT as i32) as usize;
                 let i = idx(tt, zz as usize);
                 beds.push((i, elev[i]));
             }
         }
-        if beds.is_empty() { return 0.0; }
+        if beds.is_empty() {
+            return 0.0;
+        }
         beds.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
         let n = beds.len().min(16).max(1);
         let per_d = (add_m3 / (ca * n as f32)).min(MAX_DEPTH);
@@ -209,7 +237,9 @@ impl SurfaceWater {
         for _ in 0..12 {
             for dz in -r..=r {
                 let zz = zi as i32 + dz;
-                if zz < 1 || zz >= NZ as i32 - 1 { continue; }
+                if zz < 1 || zz >= NZ as i32 - 1 {
+                    continue;
+                }
                 for dt in -r..=r {
                     let tt = (ti as i32 + dt).rem_euclid(NT as i32) as usize;
                     self.equalize_cell(elev, tt, zz as usize, 0.60);
@@ -229,7 +259,9 @@ impl SurfaceWater {
         seed: &mut u32,
     ) {
         let dt = dt_days.max(0.0);
-        if dt <= 0.0 { return; }
+        if dt <= 0.0 {
+            return;
+        }
 
         // --- rain into columns + spawn a few particles ---
         let rain_scale = 2.8 * dt;
@@ -266,14 +298,20 @@ impl SurfaceWater {
             for t in 0..NT {
                 let i = idx(t, z);
                 let d = self.depth[i];
-                if d < 0.05 { continue; }
+                if d < 0.05 {
+                    continue;
+                }
                 let di = down[i] as usize;
-                if di == i || di >= elev.len() { continue; }
+                if di == i || di >= elev.len() {
+                    continue;
+                }
                 let surf = elev[i] + d;
                 let nsurf = elev[di] + self.depth[di];
                 // Need a real head before draining — stops flat pools from
                 // collapsing into thin downhill ribbons every tick.
-                if surf <= nsurf + 0.12 { continue; }
+                if surf <= nsurf + 0.12 {
+                    continue;
+                }
                 let send = ((surf - nsurf - 0.08) * 0.18 * dt.min(1.0)).min(d * 0.28);
                 next[i] -= send;
                 next[di] = (next[di] + send).min(MAX_DEPTH);
@@ -314,11 +352,15 @@ impl SurfaceWater {
         for &(dt, dz) in &N4 {
             let nt = (t as i32 + dt).rem_euclid(NT as i32) as usize;
             let nz = z as i32 + dz;
-            if nz < 0 || nz >= NZ as i32 { continue; }
+            if nz < 0 || nz >= NZ as i32 {
+                continue;
+            }
             let j = idx(nt, nz as usize);
             let surf_j = elev[j] + self.depth[j];
             let diff = surf_i - surf_j;
-            if diff.abs() < 0.04 { continue; }
+            if diff.abs() < 0.04 {
+                continue;
+            }
             // Transfer so free surfaces meet (Minecraft flat water).
             let xfer = diff * 0.5 * rate;
             if xfer > 0.0 {
@@ -336,7 +378,9 @@ impl SurfaceWater {
     fn spawn_particles(&mut self, elev: &[f32], rain: &[f32], seed: &mut u32, dt: f32) {
         let n = ((180.0 * dt).ceil() as usize).clamp(20, 400);
         for _ in 0..n {
-            if self.particles.len() >= MAX_PARTICLES { break; }
+            if self.particles.len() >= MAX_PARTICLES {
+                break;
+            }
             *seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
             let t = ((*seed >> 8) % NT as u32) as f32;
             *seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
@@ -346,7 +390,9 @@ impl SurfaceWater {
             // Prefer wet / channel cells.
             *seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
             let u = ((*seed >> 8) & 0xFFFF) as f32 / 65535.0;
-            if u > r * 1.4 + 0.15 { continue; }
+            if u > r * 1.4 + 0.15 {
+                continue;
+            }
             let _ = elev;
             self.particles.push(WaterParticle {
                 t,
@@ -374,10 +420,7 @@ impl SurfaceWater {
                 p.z = (p.z + dz_.clamp(-1.0, 1.0) * 6.0 * dt).clamp(1.0, (NZ - 2) as f32);
             }
             // Deposit into column — particles become pool mass.
-            let di = idx(
-                (p.t as usize) % NT,
-                (p.z as usize).min(NZ - 1),
-            );
+            let di = idx((p.t as usize) % NT, (p.z as usize).min(NZ - 1));
             let deposit = p.mass * (0.55 * dt).min(1.0);
             self.depth[di] = (self.depth[di] + deposit).min(MAX_DEPTH);
             p.mass -= deposit;
@@ -429,7 +472,9 @@ impl SurfaceWater {
             for t in 0..NT {
                 let i = idx(t, z);
                 if let Some(mask) = skip_lake {
-                    if mask[i] != 0 { continue; }
+                    if mask[i] != 0 {
+                        continue;
+                    }
                 }
                 if self.depth[i] >= VISIBLE {
                     wet[i] = true;
@@ -444,7 +489,9 @@ impl SurfaceWater {
         for z in 1..NZ - 1 {
             for t in 0..NT {
                 let seed = idx(t, z);
-                if !wet[seed] || comp[seed] >= 0 { continue; }
+                if !wet[seed] || comp[seed] >= 0 {
+                    continue;
+                }
                 let cid = levels.len() as i32;
                 let mut level = elev[seed] + self.depth[seed];
                 stack.clear();
@@ -458,9 +505,13 @@ impl SurfaceWater {
                     for &(dt, dz) in &N4 {
                         let nt = (ct as i32 + dt).rem_euclid(NT as i32) as usize;
                         let nz = cz as i32 + dz;
-                        if nz < 1 || nz >= NZ as i32 - 1 { continue; }
+                        if nz < 1 || nz >= NZ as i32 - 1 {
+                            continue;
+                        }
                         let ni = idx(nt, nz as usize);
-                        if !wet[ni] || comp[ni] >= 0 { continue; }
+                        if !wet[ni] || comp[ni] >= 0 {
+                            continue;
+                        }
                         comp[ni] = cid;
                         stack.push(ni);
                     }
@@ -472,11 +523,17 @@ impl SurfaceWater {
                     for &(dt, dz) in &N4 {
                         let nt = (ct as i32 + dt).rem_euclid(NT as i32) as usize;
                         let nz = cz as i32 + dz;
-                        if nz < 1 || nz >= NZ as i32 - 1 { continue; }
+                        if nz < 1 || nz >= NZ as i32 - 1 {
+                            continue;
+                        }
                         let ni = idx(nt, nz as usize);
-                        if comp[ni] >= 0 { continue; }
+                        if comp[ni] >= 0 {
+                            continue;
+                        }
                         if let Some(mask) = skip_lake {
-                            if mask[ni] != 0 { continue; }
+                            if mask[ni] != 0 {
+                                continue;
+                            }
                         }
                         if elev[ni] < level - 0.04 {
                             comp[ni] = cid;
@@ -493,12 +550,17 @@ impl SurfaceWater {
             for t in 0..NT {
                 let i = idx(t, z);
                 let cid = comp[i];
-                if cid < 0 { continue; }
+                if cid < 0 {
+                    continue;
+                }
                 let level = levels[cid as usize];
                 let depth = (level - elev[i]).max(0.0);
-                if depth < 0.04 { continue; }
-                // Dense emission — only thin fringe subsamples under budget pressure.
-                if depth < 0.25 && emitted > max_cells * 3 / 4 && (t + z) % 2 != 0 {
+                if depth < 0.04 {
+                    continue;
+                }
+                // Prefer contiguous sheets; only subsample ultra-thin fringe
+                // once we're hard against the cell budget.
+                if depth < 0.12 && emitted > max_cells * 9 / 10 && (t + z) % 2 != 0 {
                     continue;
                 }
 
@@ -506,7 +568,8 @@ impl SurfaceWater {
                 let th1 = (t + 1) as f32 * cell_t;
                 let z0 = (z as f32 / NZ as f32 - 0.5) * hab.length;
                 let z1 = z0 + cell_z;
-                let r = hab.radius - level - 0.03;
+                // Same lift as lake surfaces — clear of terrain z-fight.
+                let r = hab.radius - level - 0.14;
                 let p00 = hab.to_world(th0, z0, r);
                 let p10 = hab.to_world(th1, z0, r);
                 let p01 = hab.to_world(th0, z1, r);
@@ -514,7 +577,9 @@ impl SurfaceWater {
                 let base = verts.len() as i32;
                 let nrm = {
                     let toward = [-p00[0], -p00[1], 0.0f32];
-                    let len = (toward[0]*toward[0] + toward[1]*toward[1]).sqrt().max(1e-6);
+                    let len = (toward[0] * toward[0] + toward[1] * toward[1])
+                        .sqrt()
+                        .max(1e-6);
                     [toward[0] / len, toward[1] / len, 0.0]
                 };
                 // COLOR.a = water depth — shore softens in the shader.
@@ -524,7 +589,7 @@ impl SurfaceWater {
                     normals.push(nrm);
                     colors.push(col);
                 }
-                indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+                indices.extend_from_slice(&[base, base + 2, base + 1, base, base + 3, base + 2]);
                 emitted += 1;
                 if emitted >= max_cells {
                     return (verts, normals, indices, colors);
@@ -547,7 +612,11 @@ impl SurfaceWater {
                 n += 1;
             }
         }
-        if n == 0 { 0.0 } else { s / n as f32 }
+        if n == 0 {
+            0.0
+        } else {
+            s / n as f32
+        }
     }
 }
 
@@ -571,7 +640,9 @@ mod tests {
         let mut w = SurfaceWater::default();
         for dz in -8i32..=8 {
             for dt in -8i32..=8 {
-                if dt.abs() <= 4 && dz.abs() <= 4 { continue; }
+                if dt.abs() <= 4 && dz.abs() <= 4 {
+                    continue;
+                }
                 let tt = (ti as i32 + dt).rem_euclid(NT as i32) as usize;
                 let zz = (zi as i32 + dz) as usize;
                 w.depth[idx(tt, zz)] = 2.0;

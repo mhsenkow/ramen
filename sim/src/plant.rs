@@ -52,7 +52,9 @@ pub struct PlantSim {
 
 impl PlantSim {
     pub fn new() -> Self {
-        Self { plants: Vec::with_capacity(4096) }
+        Self {
+            plants: Vec::with_capacity(4096),
+        }
     }
 
     /// Place stands on good ground: elevated above water, with drainage flux.
@@ -64,7 +66,7 @@ impl PlantSim {
         soil: &Soil,
         n_stands: usize,
     ) {
-        use crate::terrain::{NT, NZ, idx as tidx};
+        use crate::terrain::{idx as tidx, NT, NZ};
         let n_stands = n_stands.min(MAX_PLANTS);
         let mut rng = hab.seed ^ 0x51A47;
         let mut placed = 0usize;
@@ -78,13 +80,29 @@ impl PlantSim {
             let i = tidx(ti, zi);
             let e = elev[i];
             let f = flux[i];
-            if e <= hab.water_level + 2.0 { continue; }
-            if f < 0.08 && e < hab.max_elevation * 0.15 { continue; }
+            if e <= hab.water_level + 2.0 {
+                continue;
+            }
+            if f < 0.08 && e < hab.max_elevation * 0.15 {
+                continue;
+            }
 
             let theta = (ti as f32 / NT as f32) * std::f32::consts::TAU;
             let z = (zi as f32 / NZ as f32 - 0.5) * hab.length;
             let s = soil.sample(theta, z);
-            if s.moisture < 0.12 { continue; }
+            if s.moisture < 0.12 {
+                continue;
+            }
+            let prov = crate::province::province_at(hab, theta, z);
+            // City cores keep sparse street trees; farmland denser orchard stands.
+            let city_w = prov.weight(crate::province::id::CITY);
+            let farm_w = prov.weight(crate::province::id::FARMLAND);
+            if city_w > 0.5 {
+                rng = rng.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                if ((rng >> 16) & 0xFF) as f32 / 255.0 > 0.28 {
+                    continue;
+                }
+            }
 
             let mut p = Plant::default();
             p.theta = theta;
@@ -93,13 +111,21 @@ impl PlantSim {
             p.n_status = s.n.clamp(0.1, 1.0);
             p.water_status = s.moisture.clamp(0.1, 1.0);
             // Slight size jitter from flux (riparian edge grows faster).
-            let scale = 0.85 + 0.40 * f.clamp(0.0, 1.0);
+            let mut scale = 0.85 + 0.40 * f.clamp(0.0, 1.0);
+            if farm_w > 0.4 {
+                scale *= 0.82; // orchard scale, not wild canopy
+            }
+            if city_w > 0.4 {
+                scale *= 0.70;
+            }
             p.root *= scale;
             p.leaf *= scale;
             p.stem *= scale;
             self.plants.push(p);
             placed += 1;
-            if self.plants.len() >= MAX_PLANTS { break; }
+            if self.plants.len() >= MAX_PLANTS {
+                break;
+            }
         }
     }
 
@@ -113,7 +139,9 @@ impl PlantSim {
         trophic: &crate::trophic::TrophicFields,
     ) {
         let dt = dt_days.max(0.0);
-        if dt <= 0.0 { return; }
+        if dt <= 0.0 {
+            return;
+        }
         let light_sched = weather.light_now();
 
         // Coarse leaf grid once per tick — O(n). The old stand_leaf_near scan
@@ -121,7 +149,9 @@ impl PlantSim {
         let leaf_grid = self.build_leaf_grid(hab);
         let n = self.plants.len();
         for i in 0..n {
-            if !self.plants[i].alive { continue; }
+            if !self.plants[i].alive {
+                continue;
+            }
 
             let (th, zz) = (self.plants[i].theta, self.plants[i].z);
             let local_leaf = sample_leaf_grid(&leaf_grid, hab, th, zz);
@@ -140,12 +170,14 @@ impl PlantSim {
             }
 
             let s = soil.sample(th, zz);
-            let water = s.moisture.clamp(0.05, 1.0);
+            let arid = weather.aridity_at(th, zz);
+            // Rain-shadow / arid provinces starve canopy; windward stays lush.
+            let water = (s.moisture * (1.2 - arid * 0.85)).clamp(0.05, 1.0);
             let nitro = s.n.clamp(0.05, 1.0);
             let temp_f = ((temp - 5.0) / 20.0).clamp(0.15, 1.0);
             // Miami NPP scales carbon gain — productivity flows from climate (1012).
             let npp = trophic.npp_at(th, zz, hab.length);
-            let npp_f = (npp / 1200.0).clamp(0.35, 1.45);
+            let npp_f = (npp / 1200.0).clamp(0.35, 1.45) * (1.15 - arid * 0.55);
             // Grazing pressure released where fear is high (1029 cascade).
             let graze = trophic.grazer_at(th, zz, hab.length)
                 * (1.0 - trophic.fear_at(th, zz, hab.length) * 0.85);
@@ -159,9 +191,13 @@ impl PlantSim {
             self.plants[i].age += dt;
 
             // Transpiration tracked as water drawdown on status (humidity loop later).
-            let transpire = leaf_area * light * 0.08 * dt;
+            let transpire = leaf_area * light * (0.08 + arid * 0.06) * dt;
             self.plants[i].water_status = (water - transpire * 0.15).clamp(0.05, 1.0);
 
+            // Arid drought: shrink canopy so leeward reads as scrub, not forest.
+            if arid > 0.55 && water < 0.28 {
+                self.plants[i].leaf = (self.plants[i].leaf * (1.0 - 0.08 * dt)).max(0.05);
+            }
             let shaded = light < 0.35;
             let drought = self.plants[i].water_status < 0.35;
             let n_limited = nitro < 0.35;
@@ -169,8 +205,12 @@ impl PlantSim {
             allocation_step(&mut self.plants[i], dt, shaded, drought, n_limited);
 
             // Stress / death.
-            if drought { self.plants[i].stress += 0.15 * dt; }
-            if light < 0.12 { self.plants[i].stress += 0.08 * dt; }
+            if drought {
+                self.plants[i].stress += 0.15 * dt;
+            }
+            if light < 0.12 {
+                self.plants[i].stress += 0.08 * dt;
+            }
             if self.plants[i].stress > 1.0 {
                 self.plants[i].alive = false;
             } else {
@@ -183,7 +223,9 @@ impl PlantSim {
         let r2 = radius * radius;
         let mut sum = 0.0f32;
         for p in &self.plants {
-            if !p.alive { continue; }
+            if !p.alive {
+                continue;
+            }
             let dth = angle_diff(p.theta, theta) * 900.0; // arc metres at ~hull radius
             let dz = p.z - z;
             if dth * dth + dz * dz <= r2 {
@@ -197,7 +239,9 @@ impl PlantSim {
         let mut cells = vec![0.0f32; LEAF_GT * LEAF_GZ];
         let len = hab.length.max(1.0);
         for p in &self.plants {
-            if !p.alive { continue; }
+            if !p.alive {
+                continue;
+            }
             let ti = ((p.theta.rem_euclid(std::f32::consts::TAU) / std::f32::consts::TAU)
                 * LEAF_GT as f32) as usize
                 % LEAF_GT;
@@ -217,8 +261,8 @@ struct LeafGrid {
 
 fn sample_leaf_grid(grid: &LeafGrid, hab: &Habitat, theta: f32, z: f32) -> f32 {
     let len = hab.length.max(1.0);
-    let ti = ((theta.rem_euclid(std::f32::consts::TAU) / std::f32::consts::TAU) * LEAF_GT as f32)
-        as i32;
+    let ti =
+        ((theta.rem_euclid(std::f32::consts::TAU) / std::f32::consts::TAU) * LEAF_GT as f32) as i32;
     let zi = (((z / len) + 0.5).clamp(0.0, 0.999) * LEAF_GZ as f32) as i32;
     // 3×3 neighbourhood ≈ plant-scale shade without an O(n) radius walk.
     let mut sum = 0.0f32;
@@ -238,7 +282,11 @@ fn sample_leaf_grid(grid: &LeafGrid, hab: &Habitat, theta: f32, z: f32) -> f32 {
 #[inline]
 fn angle_diff(a: f32, b: f32) -> f32 {
     let d = (a - b).rem_euclid(std::f32::consts::TAU);
-    if d > std::f32::consts::PI { d - std::f32::consts::TAU } else { d }
+    if d > std::f32::consts::PI {
+        d - std::f32::consts::TAU
+    } else {
+        d
+    }
 }
 
 /// Allocate carbon by demand. Pure enough for unit tests (item 139).
@@ -246,14 +294,10 @@ fn angle_diff(a: f32, b: f32) -> f32 {
 /// - shaded → prefer stem (leggy)
 /// - drought → abort repro, prefer root
 /// - N limited → small leaves
-pub fn allocation_step(
-    p: &mut Plant,
-    dt: f32,
-    shaded: bool,
-    drought: bool,
-    n_limited: bool,
-) {
-    if !p.alive || p.carbon <= 0.0 || dt <= 0.0 { return; }
+pub fn allocation_step(p: &mut Plant, dt: f32, shaded: bool, drought: bool, n_limited: bool) {
+    if !p.alive || p.carbon <= 0.0 || dt <= 0.0 {
+        return;
+    }
 
     let mut w_root = 0.25;
     let mut w_leaf = 0.35;

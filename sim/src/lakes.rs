@@ -4,7 +4,7 @@
 //! spill elevation, surface area, and a volume that rises/falls with the
 //! closed water budget (inflow from discharge, loss to evaporation).
 
-use crate::terrain::{NT, NZ, idx};
+use crate::terrain::{idx, NT, NZ};
 
 #[derive(Clone, Debug)]
 pub struct Lake {
@@ -57,7 +57,9 @@ impl Lakes {
         for z in 1..NZ - 1 {
             for t in 0..NT {
                 let i = idx(t, z);
-                if lake[i] == 0 || visited[i] { continue; }
+                if lake[i] == 0 || visited[i] {
+                    continue;
+                }
                 let mut stack = vec![i];
                 visited[i] = true;
                 let mut cells = Vec::new();
@@ -77,14 +79,20 @@ impl Lakes {
                     for &(dt, dz) in &[(-1i32, 0), (1, 0), (0, -1), (0, 1)] {
                         let nt = (ct as i32 + dt).rem_euclid(NT as i32) as usize;
                         let nz = cz as i32 + dz;
-                        if nz < 0 || nz >= NZ as i32 { continue; }
+                        if nz < 0 || nz >= NZ as i32 {
+                            continue;
+                        }
                         let ni = idx(nt, nz as usize);
-                        if visited[ni] || lake[ni] == 0 { continue; }
+                        if visited[ni] || lake[ni] == 0 {
+                            continue;
+                        }
                         visited[ni] = true;
                         stack.push(ni);
                     }
                 }
-                if cells.len() < 4 { continue; }
+                if cells.len() < 4 {
+                    continue;
+                }
                 let id = (lakes.len() + 1) as u16;
                 for &c in &cells {
                     cell_lake[c] = id;
@@ -131,11 +139,9 @@ impl Lakes {
         for lake in &mut self.lakes {
             let rain_in = rain_mean * lake.area_m2 * 0.001 * dt_days;
             let flow_in = lake.inflow * dt_days * 50.0;
-            lake.volume = (lake.volume + rain_in + flow_in
-                - lake.area_m2 * evap).max(0.0);
-            let depth = (lake.volume / (lake.area_m2 * 0.35 + 1.0)).min(
-                (lake.spill_elev - lake.bed_elev).max(0.1),
-            );
+            lake.volume = (lake.volume + rain_in + flow_in - lake.area_m2 * evap).max(0.0);
+            let depth = (lake.volume / (lake.area_m2 * 0.35 + 1.0))
+                .min((lake.spill_elev - lake.bed_elev).max(0.1));
             lake.level = lake.bed_elev + depth;
             if lake.level > lake.spill_elev {
                 lake.level = lake.spill_elev;
@@ -146,7 +152,9 @@ impl Lakes {
 
     pub fn at_cell(&self, ti: usize, zi: usize) -> Option<&Lake> {
         let id = self.cell_lake[idx(ti % NT, zi.min(NZ - 1))] as usize;
-        if id == 0 { return None; }
+        if id == 0 {
+            return None;
+        }
         self.lakes.iter().find(|l| l.id == id as u32)
     }
 
@@ -162,11 +170,12 @@ impl Lakes {
         let mut normals = Vec::new();
         let mut indices = Vec::new();
         let mut colors = Vec::new();
-        if self.lakes.is_empty() { return (verts, normals, indices, colors); }
+        if self.lakes.is_empty() {
+            return (verts, normals, indices, colors);
+        }
 
-        let id_to_level: std::collections::HashMap<u16, f32> = self.lakes.iter()
-            .map(|l| (l.id as u16, l.level))
-            .collect();
+        let id_to_level: std::collections::HashMap<u16, f32> =
+            self.lakes.iter().map(|l| (l.id as u16, l.level)).collect();
         let cell_t = std::f32::consts::TAU / NT as f32;
         let cell_z = hab.length / NZ as f32;
         let mut emitted = 0usize;
@@ -175,44 +184,59 @@ impl Lakes {
             for t in 0..NT {
                 let i = idx(t, z);
                 let lid = self.cell_lake[i];
-                if lid == 0 { continue; }
-                let Some(&level) = id_to_level.get(&lid) else { continue; };
+                if lid == 0 {
+                    continue;
+                }
+                let Some(&level) = id_to_level.get(&lid) else {
+                    continue;
+                };
                 let depth = level - elev[i];
                 // Include a shallow fringe so the shore isn't a hard grid cut.
-                if depth < 0.02 { continue; }
-                if depth < 0.22 && emitted > max_cells * 4 / 5 && (t + z) % 2 != 0 {
+                if depth < 0.02 {
+                    continue;
+                }
+                if depth < 0.10 && emitted > max_cells * 9 / 10 && (t + z) % 2 != 0 {
                     continue;
                 }
                 let th0 = t as f32 * cell_t;
                 let th1 = (t + 1) as f32 * cell_t;
                 let z0 = (z as f32 / NZ as f32 - 0.5) * hab.length;
                 let z1 = z0 + cell_z;
-                let r = hab.radius - level - 0.03;
+                // Lift clear of faceted terrain — too low and screen-depth shore
+                // collapses; too high and lakes float. ~22 cm reads as a sheet.
+                let r = hab.radius - level - 0.22;
                 let p00 = hab.to_world(th0, z0, r);
                 let p10 = hab.to_world(th1, z0, r);
                 let p01 = hab.to_world(th0, z1, r);
                 let p11 = hab.to_world(th1, z1, r);
                 let base = verts.len() as i32;
                 let nrm = {
-                    let u = [p10[0]-p00[0], p10[1]-p00[1], p10[2]-p00[2]];
-                    let v = [p01[0]-p00[0], p01[1]-p00[1], p01[2]-p00[2]];
-                    let cx = u[1]*v[2] - u[2]*v[1];
-                    let cy = u[2]*v[0] - u[0]*v[2];
-                    let cz = u[0]*v[1] - u[1]*v[0];
-                    let len = (cx*cx + cy*cy + cz*cz).sqrt().max(1e-6);
+                    let u = [p10[0] - p00[0], p10[1] - p00[1], p10[2] - p00[2]];
+                    let v = [p01[0] - p00[0], p01[1] - p00[1], p01[2] - p00[2]];
+                    let cx = u[1] * v[2] - u[2] * v[1];
+                    let cy = u[2] * v[0] - u[0] * v[2];
+                    let cz = u[0] * v[1] - u[1] * v[0];
+                    let len = (cx * cx + cy * cy + cz * cz).sqrt().max(1e-6);
                     let toward = [-p00[0], -p00[1], 0.0];
-                    let flip = if cx*toward[0] + cy*toward[1] + cz*toward[2] < 0.0 { -1.0 } else { 1.0 };
+                    let flip = if cx * toward[0] + cy * toward[1] + cz * toward[2] < 0.0 {
+                        -1.0
+                    } else {
+                        1.0
+                    };
                     [cx / len * flip, cy / len * flip, cz / len * flip]
                 };
-                let col = [0.16, 0.38, 0.78, depth.min(10.0)];
+                let col = [0.22, 0.52, 0.88, depth.min(10.0)];
                 for p in [p00, p10, p11, p01] {
                     verts.push(p);
                     normals.push(nrm);
                     colors.push(col);
                 }
-                indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+                // Clockwise when viewed from the axis (Godot front faces).
+                indices.extend_from_slice(&[base, base + 2, base + 1, base, base + 3, base + 2]);
                 emitted += 1;
-                if emitted >= max_cells { return (verts, normals, indices, colors); }
+                if emitted >= max_cells {
+                    return (verts, normals, indices, colors);
+                }
             }
         }
         (verts, normals, indices, colors)

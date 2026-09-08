@@ -1,28 +1,36 @@
 extends Node3D
 const RamaControls = preload("res://scripts/controls.gd")
+const RamaBody = preload("res://scripts/avatar/body.gd")
+const RamaGait = preload("res://scripts/avatar/gait.gd")
 ## RAMA CYCLE — MVP-0. The world you can stand in. (REQUIREMENTS.md §G)
 ##
 ## Everything geometric comes from the Rust core (rama_sim). This script places
 ## it, lights it, and gets a camera into it. No terrain maths lives here.
 
-const FAR_NT := 1280
-const FAR_NZ := 800
-const FAR_OFFSET := 1.15     # sit under near chunks so the LOD edge doesn't z-fight
+const FAR_NT := 896
+const FAR_NZ := 560
+const FAR_OFFSET := 1.35     # sit under near chunks so the LOD edge doesn't z-fight
 const CHUNK_SPAN := 44.0     # metres per near chunk, both lateral axes
 const CHUNK_CELL := 1.4      # voxel size, metres
 const CHUNK_RADIUS := 5      # chunks loaded around the player
 const UNLOAD_RADIUS := 6
 const DIG_SNAP := 1.0        # brush centres land on a 1 m grid
-const NEAR_FADE_START := 150.0
-const NEAR_FADE_END := 235.0
+const MID_SPAN := 1500.0     # metres across the mid-detail window
+const MID_N := 300           # 5 m cells — between chunk 1.4 m and far 6-10 m
+const MID_MOVE := 180.0      # rebuild after this much travel
+const NEAR_FADE_START := 130.0
+const NEAR_FADE_END := 250.0
 
 var terrain                  # RamaTerrain (Rust)
 var P: Dictionary
 var spawn: Dictionary
 var player: Node3D
 var hud: Label
+var ui
 var loaded := {}
+var chunk_fail := {}
 var pending: Array = []
+var pending_set := {}
 var chunk_root: Node3D
 var shot_mode := false
 var modules: Array = []
@@ -30,8 +38,20 @@ var day := 1.0
 var clock := 0.0
 var post_layer: CanvasLayer
 var cloud_node: MeshInstance3D
-var axis_mat: StandardMaterial3D
+var axis_mat: StandardMaterial3D  # spine core (kept for compat)
+var spine_mat: StandardMaterial3D
+var carriage_mat: StandardMaterial3D
+var ring_mat_a: StandardMaterial3D
+var ring_mat_b: StandardMaterial3D
+var day_carriage: MeshInstance3D
+var endcap_ring_a: MeshInstance3D
+var endcap_ring_b: MeshInstance3D
+var carriage_z := 0.0
+var last_carriage_steam_z := 1e9
+const CARRIAGE_FRAC := 0.10  # fraction of habitat length
+const CARRIAGE_PROX_M := 900.0  # RamaSun falloff along z
 var dust: MultiMeshInstance3D
+var insects: MultiMeshInstance3D
 var census := {}
 var town_marks: Array = []
 var mini_vp: SubViewport
@@ -47,6 +67,13 @@ var menu: CanvasLayer
 var audio: Node
 var mini_size := 150.0
 const DAY_LENGTH := 420.0   # seconds per engineered day
+## Fast-day preview: full cycle in ~DAY_LENGTH/FAST_DAY_MULT real seconds.
+const FAST_DAY_MULT := 18.0
+var day_speed := 1.0
+var sky_event := 0  # 0 clear, 1 fog, 2 storm
+var sky_intensity := 0.0
+var sky_fog := 0.0
+var last_sky_event := 0
 var chunk_arc := 0.0
 var chunk_span := 44.8
 var n_around := 128
@@ -59,9 +86,27 @@ var foam_mm: MultiMeshInstance3D
 var splash_mm: MultiMeshInstance3D
 var stockpile_mm: MultiMeshInstance3D
 var agent_mm: MultiMeshInstance3D
+## The colony, at two tiers. Far: one MultiMesh per build, so a crowd across a
+## field reads as different men rather than a row of capsules. Near: a small
+## pool of real articulated rigs, because these are the people you will meet.
+var agent_root: Node3D
+var agent_far: Dictionary = {}      # archetype -> MultiMeshInstance3D
+var agent_far_xf: Dictionary = {}   # archetype -> Array[Transform3D]
+var agent_far_col: Dictionary = {}  # archetype -> Array[Color]
+var agent_rigs: Array = []
+const AGENT_RIGS := 6
+const AGENT_RIG_RANGE := 62.0
+var work_mm: MultiMeshInstance3D
+var roof_mm: MultiMeshInstance3D
+var follower_mm: MultiMeshInstance3D
 var plot_mm: MultiMeshInstance3D
 var carcass_mm: MultiMeshInstance3D
 var station_mm: MultiMeshInstance3D
+var litter_mm: MultiMeshInstance3D
+var rock_prop_mm: MultiMeshInstance3D
+var reed_mm: MultiMeshInstance3D
+var rain_mm: MultiMeshInstance3D
+var grazer_mm: MultiMeshInstance3D
 var world_env: WorldEnvironment
 var mist_phase := 0.0
 var steam_life := 0.0
@@ -70,15 +115,29 @@ var last_day_band := ""
 var catchment_root: Node3D
 var catchment_phase := 0.0
 var autosave_accum := 0.0
+var life_refresh_accum := 0.0
+var life_phase := 0
+var agent_refresh_accum := 0.0
 const AUTOSAVE_SECS := 180.0
 var map_label: Label
 var soil_chip: ColorRect
 var soil_chip_label: Label
 var grass_mm: MultiMeshInstance3D
 var grass_anchor := Vector2(1e9, 1e9)
-const GRASS_N := 5200
-const GRASS_RADIUS := 27.0
+var mid_mi: MeshInstance3D
+var mid_anchor := Vector2(1e9, 1e9)
+const GRASS_N := 6400
+const GRASS_RADIUS := 30.0
 const GRASS_MOVE := 7.0
+const GRASS_STRIDE := 6  # theta, z, r, scale, lush, biome_id
+var rama_sun: DirectionalLight3D
+var bounce_accum := 0.0
+var bounce_map: PackedByteArray = PackedByteArray()
+var bounce_anchor := Vector2(1e9, 1e9)
+var dwelling_mats: Array = []  # ShaderMaterial for dusk emission_boost
+var plant_species_near: Array = []  # MultiMeshInstance3D per archetype
+var plant_species_mid: Array = []
+var threaded_meshing := true
 var plant_mm: MultiMeshInstance3D
 var plant_mm_mid: MultiMeshInstance3D
 var plant_mm_far: MultiMeshInstance3D
@@ -102,6 +161,9 @@ var catchment_dirty := false
 var catchment_cooldown := 0.0
 var visual_phase := 0
 var visuals_pending := false
+var sim_frame_cooldown := 0  # frames to skip heavy visuals after sim_tick
+var water_bio_name := ""
+var water_bio_cache_at := Vector2(1e9, 1e9)
 var plant_refresh_due := false
 var plant_data: PackedFloat32Array = PackedFloat32Array()
 var plant_bucket_idx := 0
@@ -112,20 +174,70 @@ var plant_anchor := Vector2(-999.0, -999.0)
 var remesh_queue: Array = []
 var stockpile_refresh_in := -1.0
 var dig_held := false
+## Hull arc+z of last `_queue_chunks` — ring only rebuilds after real travel.
+var stream_anchor := Vector2(-99999.0, -99999.0)
+## Shared near-chunk material — one ShaderMaterial for the whole ring.
+var _chunk_terrain_mat: ShaderMaterial
+var _drum_diag := 0.0
+var _sky_poll_accum := 0.0
+var _sky_inten_target := 0.0
+var _sky_fog_target := 0.0
+var _sched_phase := -1.0
+var _sched_day := -1.0
+var _sched_cz := 1e9
+var _last_dusk_boost := -1.0
+var _insect_accum := 0.0
+var _reduced_motion_applied := -1
+var _hud_accum := 0.0
+var _audio_accum := 0.0
+var _hud_e := 0.0
+var _hud_fx := 0.0
+var _water_dep := 0.0
+var _water_fx := 0.0
 const SIM_STEP_DAYS := 0.02  # ~ habitat days per real second at 1x
 const CATCHMENT_COOLDOWN := 0.28
 const PLANT_FILL_BUDGET := 120
 const SAVE_PATH := "user://rama_strokes.bin"
 const SAVE_SOIL := "user://rama_soil.bin"
+const SAVE_DWELL := "user://rama_dwellings.bin"
 const SAVE_WORLD := "user://rama_world.json"
+var playtest := false
+var playtest_t0_ms := 0
+var playtest_lookup_ms := -1
+var playtest_walk_ms := -1
+var playtest_dig_ms := -1
+var returning_player := false
+var away_blurb := ""
+var grass_n_cap := GRASS_N
+var grass_radius_cap := GRASS_RADIUS
+var plant_lod_radius := 900.0
+var mid_span_eff := MID_SPAN
 
 func _ready() -> void:
 	shot_mode = "--shot" in OS.get_cmdline_user_args()
 	var selftest := "--selftest" in OS.get_cmdline_user_args()
+	var bisect := "--bisect" in OS.get_cmdline_user_args()
+	var farprobe := "--farprobe" in OS.get_cmdline_user_args()
+	var parade := "--parade" in OS.get_cmdline_user_args()
+	var photo := "--photo" in OS.get_cmdline_user_args()
+	playtest = "--playtest" in OS.get_cmdline_user_args()
+	if "--fast-day" in OS.get_cmdline_user_args():
+		day_speed = FAST_DAY_MULT
+	for a in OS.get_cmdline_user_args():
+		if a.begins_with("--quality="):
+			RamaControls.quality = a.split("=")[1]
+		if a == "--threaded":
+			threaded_meshing = true
+		if a == "--no-threaded":
+			threaded_meshing = false
 	terrain = ClassDB.instantiate("RamaTerrain")
+	if terrain.has_method("set_threaded_meshing"):
+		terrain.set_threaded_meshing(threaded_meshing)
 	var t0 := Time.get_ticks_msec()
 	terrain.generate(0)
 	P = terrain.params()
+	_drum_diag = 0.0
+	_chunk_terrain_mat = null
 	chunk_arc = CHUNK_SPAN / float(P["radius"])
 	chunk_span = float(P["chunk_span"])
 	n_around = int(P["chunks_around"])
@@ -138,6 +250,9 @@ func _ready() -> void:
 	print("[rama] habitat generated in %d ms" % (Time.get_ticks_msec() - t0))
 	print("[rama] params: ", P)
 	print("[rama] spawn: ", spawn)
+	if day_speed > 1.0:
+		_apply_day_speed(false)
+		print("[rama] fast-day on (×%.0f) — F6 toggles" % day_speed)
 
 	clock = DAY_LENGTH * 0.30   # wake mid-morning, not at midnight
 	RamaControls.install()
@@ -146,11 +261,24 @@ func _ready() -> void:
 	add_child(menu)
 	audio = load("res://scripts/audio.gd").new()
 	add_child(audio)
+	if not RamaControls.cfg_exists() and not shot_mode and not selftest and not bisect and not farprobe and not parade:
+		# First-run a11y + content before wake (§2176–2178).
+		call_deferred("_open_first_run")
+	returning_player = FileAccess.file_exists(SAVE_WORLD)
+	if returning_player and not shot_mode and not selftest and not parade:
+		call_deferred("_offer_resume")
+	playtest_t0_ms = Time.get_ticks_msec()
 	RenderingServer.global_shader_parameter_add("rama_day",
 		RenderingServer.GLOBAL_VAR_TYPE_FLOAT, 1.0)
 	RenderingServer.global_shader_parameter_add("rama_haze",
 		RenderingServer.GLOBAL_VAR_TYPE_FLOAT, 1.0)
+	RenderingServer.global_shader_parameter_add("rama_gust",
+		RenderingServer.GLOBAL_VAR_TYPE_FLOAT, 0.55)
+	RenderingServer.global_shader_parameter_add("rama_bounce_tint",
+		RenderingServer.GLOBAL_VAR_TYPE_VEC3, Vector3(0.38, 0.48, 0.36))
+	apply_quality()
 	_build_env()
+	_build_rama_sun()
 	_build_far()
 	_build_water()
 	_build_rivers()
@@ -159,10 +287,14 @@ func _ready() -> void:
 	_build_foam()
 	_build_splash()
 	_build_stockpiles()
+	_build_litter()
 	_build_agents()
+	_build_dwellings()
 	_build_carcasses()
 	_build_stations()
 	_build_steam()
+	_build_rain()
+	_build_grazers()
 	_build_endcaps()
 	_build_axis_light()
 	chunk_root = Node3D.new(); add_child(chunk_root)
@@ -170,25 +302,106 @@ func _ready() -> void:
 	_build_towns()
 	_build_clouds()
 	_build_dust()
+	_build_insects()
 	_build_player()
+	_build_mid()
 	_build_plants()
 	_build_overlays()
 	_build_panels()
 	player.ghost = _build_ghost()
 	_queue_chunks()
-	# Only the chunks you are standing on block the first frame. The rest
-	# stream in over the following seconds.
-	_pump_chunks(18)
+	# Fill the whole near ring before the first frame. It used to stream in
+	# over the following seconds, which meant the opening shot of the game was
+	# the mid tier dithering through the holes — the loudest artefact in the
+	# picture. A chunk costs ~2 ms now, so the entire ring is ~0.3 s on the end
+	# of a load that already takes seconds.
+	stream_anchor = Vector2(float(spawn["theta"]) * float(P["radius"]), float(spawn["z"]))
+	var t_ring := Time.get_ticks_msec()
+	_pump_chunks(400)
+	print("[rama] near ring: %d chunks in %d ms" % [
+		loaded.size(), Time.get_ticks_msec() - t_ring])
 	# One biosphere tick so rain/soil exist on first frame.
 	last_sim = terrain.sim_tick(0.05)
 	refresh_agents()
+	refresh_dwellings()
+	_refresh_litter()
+	_refresh_rain()
+	_refresh_grazers()
 	print("[rama] biosphere: %d plants, lakes=%s, rain=%.3f, agents=%d" % [
 		terrain.plant_count(), terrain.lake_count(), float(last_sim.get("rain", 0.0)),
 		int(last_sim.get("agents", 0))])
 	if selftest:
-		_selftest()
+		if rama_sun:
+			rama_sun.shadow_enabled = false
+		await _selftest()
+	elif farprobe:
+		var fp = load("res://scripts/debug/farprobe.gd").new()
+		fp.world = self
+		add_child(fp)
+		fp.run()
+	elif bisect:
+		var b = load("res://scripts/debug/bisect.gd").new()
+		b.world = self
+		add_child(b)
+		b.run()
+	elif parade:
+		var pa = load("res://scripts/debug/parade.gd").new()
+		pa.world = self
+		add_child(pa)
+		await pa.run()
 	elif shot_mode:
-		_take_shots()
+		await _take_shots()
+	elif photo:
+		# Photo mode hides HUD (§2119).
+		if hud_panels:
+			hud_panels.visible = false
+		if reticle:
+			reticle.visible = false
+		RamaControls.photo_mode = true
+
+func _open_first_run() -> void:
+	if menu:
+		menu.open_first_run()
+
+func _offer_resume() -> void:
+	# Returning player: load camera/home if save exists (§2180–2182).
+	if FileAccess.file_exists(SAVE_PATH):
+		load_world()
+		if away_blurb != "":
+			note(away_blurb)
+
+func apply_quality() -> void:
+	## Low-spec / Deck: cut foliage, LOD distance, haze first (§2194–2195).
+	var vp := get_viewport()
+	match RamaControls.quality:
+		"low":
+			grass_n_cap = 1600
+			grass_radius_cap = 16.0
+			plant_lod_radius = 420.0
+			mid_span_eff = 900.0
+			RenderingServer.global_shader_parameter_set("rama_haze", 0.72)
+			if vp:
+				vp.msaa_3d = Viewport.MSAA_DISABLED
+		"deck":
+			grass_n_cap = 2400
+			grass_radius_cap = 20.0
+			plant_lod_radius = 560.0
+			mid_span_eff = 1100.0
+			RenderingServer.global_shader_parameter_set("rama_haze", 0.85)
+			if vp:
+				vp.msaa_3d = Viewport.MSAA_2X
+		_:
+			grass_n_cap = GRASS_N
+			grass_radius_cap = GRASS_RADIUS
+			plant_lod_radius = 900.0
+			mid_span_eff = MID_SPAN
+			RenderingServer.global_shader_parameter_set("rama_haze", 1.0)
+			if vp:
+				vp.msaa_3d = Viewport.MSAA_2X
+	if grass_mm:
+		refresh_grass(true)
+	if player and terrain:
+		plant_data = terrain.plants_lod(player.theta, player.z, plant_lod_radius)
 
 func _selftest() -> void:
 	var tt := Time.get_ticks_msec()
@@ -216,9 +429,47 @@ func _selftest() -> void:
 	print("prop nodes placed   : %d" % props)
 	print("spawn theta/z/r     : %.4f / %+.1f / %.1f" % [spawn["theta"], spawn["z"], spawn["radius"]])
 	print("spawn elevation     : %.1f m above hull floor" % spawn["elevation"])
+	if census.has("hypso_below_water"):
+		print("hypsometry          : below WL %.1f%%  peaks %.1f%%  elev_hash %s" % [
+			float(census.get("hypso_below_water", 0.0)) * 100.0,
+			float(census.get("hypso_peak", 0.0)) * 100.0,
+			str(census.get("elev_hash", "?"))])
+	var max_e_hab: float = float(P.get("max_elevation", 440.0))
+	var max_e_seen: float = float(census.get("max_elevation", 0.0))
+	if max_e_seen <= 0.0 and census.has("elev_max"):
+		max_e_seen = float(census.get("elev_max", 0.0))
+	if max_e_seen > 0.0:
+		var elev_ok: bool = max_e_seen >= max_e_hab * 0.70
+		print("peak elevation      : %.0f / %.0f m — %s" % [
+			max_e_seen, max_e_hab, ("PASS" if elev_ok else "FAIL")])
+		if not elev_ok:
+			push_error("peak elevation %.0f m < 70%% of authored max %.0f — radial/recipe regression" % [
+				max_e_seen, max_e_hab])
+	if terrain.has_method("province_census"):
+		var pc: Dictionary = terrain.province_census()
+		var parts: PackedStringArray = []
+		for k in pc.keys():
+			parts.append("%s=%s" % [str(k), str(pc[k])])
+		print("province census     : %s" % " ".join(parts))
 	print("player feet radius  : %.2f  (ground %.2f)" % [player.r, ground_at(player.theta, player.z)])
 	print("player world pos    : %s" % to_world(player.theta, player.z, player.r))
 	print("local up vector     : %s" % up_at(to_world(player.theta, player.z, player.r)))
+	if terrain.has_method("selftest_threaded"):
+		var thr_ok: bool = terrain.selftest_threaded()
+		print("threaded smoke      : %s  (--threaded=%s)" % [
+			"PASS" if thr_ok else "FAIL", str(threaded_meshing)])
+		if not thr_ok:
+			push_error("selftest_threaded failed — do not enable --threaded")
+	if rama_sun:
+		print("RamaSun             : energy=%.2f shadows=%s dist=%.0f" % [
+			rama_sun.light_energy, rama_sun.shadow_enabled,
+			rama_sun.directional_shadow_max_distance])
+	if terrain.has_method("spine_status"):
+		var sp: Dictionary = terrain.spine_status()
+		print("photothermal spine  : carriage_z=%.0f vapor=%.3f light=%.2f" % [
+			float(sp.get("carriage_z", 0.0)),
+			float(sp.get("vapor_rate", 0.0)),
+			float(sp.get("light_now", 0.0))])
 	# Walk the full 360 and confirm we come back upright. (REQUIREMENTS A2)
 	var th := float(spawn["theta"])
 	var steps := 720
@@ -282,8 +533,168 @@ func _selftest() -> void:
 	var tick: Dictionary = terrain.sim_tick(1.0)
 	print("biosphere 1-day     : plants %d · rain %.3f · moisture %.3f · N %.0f" % [
 		tick.get("plants", 0), tick.get("rain", 0.0), tick.get("moisture", 0.0), tick.get("nitrogen", 0.0)])
+	# The cast, and what their ground can feed. Capacity is a survey over real
+	# arable cells, so a bad site cannot grow however long you wait.
+	var dbuf: PackedFloat32Array = terrain.dwellings_lod()
+	var dn: int = int(dbuf.size() / 9.0)
+	var kind_n := [0, 0, 0]
+	var reach_n := [0, 0, 0, 0]
+	var cap_sum := 0.0
+	var cap_min := 1e9
+	var cap_max := -1e9
+	for i in dn:
+		kind_n[clampi(int(dbuf[i * 9 + 2]), 0, 2)] += 1
+		reach_n[clampi(int(dbuf[i * 9 + 6]), 0, 3)] += 1
+		var cap: float = dbuf[i * 9 + 5]
+		cap_sum += cap
+		cap_min = minf(cap_min, cap)
+		cap_max = maxf(cap_max, cap)
+	print("dwellings sited     : %d  (delve %d · terrace %d · township %d)" % [
+		dn, kind_n[0], kind_n[1], kind_n[2]])
+	# Builds. Every archetype has to construct, measure finite, and land in the
+	# right order — a body system whose numbers quietly go NaN or whose bear
+	# measures narrower than its twink is worse than one archetype.
+	var b_lines: Array = []
+	var last_sh := -1.0
+	var b_ok := true
+	for arch in RamaBody.ORDER:
+		var spec: Dictionary = RamaBody.make(arch)
+		var mm: Dictionary = RamaBody.measure(spec)
+		for k in mm:
+			if typeof(mm[k]) == TYPE_FLOAT and not is_finite(float(mm[k])):
+				b_ok = false
+				push_error("body %s: %s is not finite" % [arch, k])
+		b_lines.append("%s %.2fm sh%.2f w%.2f" % [
+			arch.substr(0, 4), float(mm["stature"]), float(mm["sh_w"]), float(mm["waist_w"])])
+		last_sh = float(mm["sh_w"])
+	print("builds              : %s" % " · ".join(b_lines))
+	var jock_v: float = float(RamaBody.measure(RamaBody.make("jock"))["sh_w"]) \
+			/ float(RamaBody.measure(RamaBody.make("jock"))["waist_w"])
+	var bear_v: float = float(RamaBody.measure(RamaBody.make("bear"))["sh_w"]) \
+			/ float(RamaBody.measure(RamaBody.make("bear"))["waist_w"])
+	print("shoulder:waist      : jock %.2f · bear %.2f — %s" % [jock_v, bear_v,
+		"PASS" if (b_ok and jock_v > 1.45 and bear_v < 1.05) else "FAIL"])
+	if not (b_ok and jock_v > 1.45 and bear_v < 1.05):
+		push_error("archetype silhouettes collapsed toward each other")
+	var seen := {}
+	for i in 64:
+		seen[agent_archetype(i)] = int(seen.get(agent_archetype(i), 0)) + 1
+	# The pause menu is where the build is actually chosen, and it is the one
+	# screen the shot harness never opens. Construct it once here so a broken
+	# creator fails the selftest rather than the player's first Escape.
+	var mnu = load("res://scripts/menu.gd").new()
+	mnu.world = self
+	add_child(mnu)
+	var menu_rows: int = mnu.get_child_count()
+	mnu.queue_free()
+	print("creator screen      : %s (%d nodes)" % [
+		"PASS" if menu_rows > 0 else "FAIL", menu_rows])
+	print("colony spread       : %d of %d builds over 64 colonists" % [
+		seen.size(), RamaBody.ORDER.size()])
+	print("legibility          : legible %d · indirect %d · opaque %d · contested %d" % [
+		reach_n[0], reach_n[1], reach_n[2], reach_n[3]])
+	if dn > 0:
+		print("carrying capacity   : %.1f..%.1f people per site (mean %.1f)" % [
+			cap_min, cap_max, cap_sum / float(dn)])
+	# Soak the colony forward and see whether the ground actually carries
+	# anyone. This is the end-to-end check: real heightfield -> arable survey
+	# -> surplus -> people arriving. Destructive, so it runs last.
+	for i in 24:
+		terrain.sim_tick(5.0)
+	refresh_dwellings()
+	var sbuf: PackedFloat32Array = terrain.dwellings_lod()
+	var grew := 0
+	var failed := 0
+	var pop := 0.0
+	for i in int(sbuf.size() / 9.0):
+		var f: float = sbuf[i * 9 + 3]
+		pop += f
+		if f > 0.5:
+			grew += 1
+		elif sbuf[i * 9 + 5] < 1.0:
+			failed += 1
+	print("after 120 days      : %.1f followers · %d sites grew · %d cannot feed one man" % [
+		pop, grew, failed])
+	print("works / followers   : %d works, %d figures placed" % [
+		work_mm.multimesh.instance_count if work_mm else 0,
+		follower_mm.multimesh.instance_count if follower_mm else 0])
+	await _selftest_far_coverage()
 	print("================================================\n")
 	get_tree().quit()
+
+## Magenta clear-colour coverage at the long-axis vantage. Catches the
+## clockwise-winding regression that made cull_back delete the far wall.
+func _selftest_far_coverage() -> void:
+	if player == null or player.cam == null:
+		print("far coverage        : SKIP (no camera)")
+		return
+	if player.get("wake_t") != null:
+		player.wake_t = 99.0
+	if player.get("fade"):
+		player.fade.visible = false
+	player.theta = 3.063
+	player.z = 2724.0
+	player.r = ground_at(player.theta, player.z)
+	player.vr = 0.0
+	player.pitch = 0.30
+	player.yaw = PI
+	player.eye = 1.72
+	terrain.set_player_pos(player.theta, player.z)
+	_queue_chunks()
+	_pump_chunks(400)
+	refresh_mid(true)
+	player._update_camera()
+	# Shadows + custom light() shaders can stall headless frame_post_draw on
+	# first compile. Probe with the lamp off — coverage is a winding test.
+	var sun_was := false
+	if rama_sun:
+		sun_was = rama_sun.shadow_enabled
+		rama_sun.shadow_enabled = false
+		rama_sun.visible = false
+	# Day cycle rewrites world_env every frame — clear colour must live on the camera.
+	var cenv := Environment.new()
+	cenv.background_mode = Environment.BG_COLOR
+	cenv.background_color = Color(1.0, 0.0, 1.0)
+	cenv.fog_enabled = false
+	cenv.tonemap_mode = Environment.TONE_MAPPER_LINEAR
+	cenv.glow_enabled = false
+	player.cam.environment = cenv
+	var was_post := false
+	if post_layer:
+		was_post = post_layer.visible
+		post_layer.visible = false
+	# Headless often never emits frame_post_draw once custom light() shaders are
+	# in play. Force a draw, then sample.
+	await get_tree().process_frame
+	RenderingServer.force_draw()
+	await get_tree().process_frame
+	var img: Image = get_viewport().get_texture().get_image()
+	player.cam.environment = null
+	if post_layer:
+		post_layer.visible = was_post
+	if rama_sun:
+		rama_sun.visible = true
+		rama_sun.shadow_enabled = sun_was
+	if img == null:
+		print("far coverage        : SKIP (no viewport image)")
+		return
+	var n := 0
+	var empty := 0
+	var y := 0
+	while y < img.get_height():
+		var x := 0
+		while x < img.get_width():
+			var c := img.get_pixel(x, y)
+			if c.r > 0.5 and c.b > 0.5 and c.g < 0.35:
+				empty += 1
+			n += 1
+			x += 4
+		y += 4
+	var frac := float(empty) / float(maxi(n, 1))
+	print("far coverage        : %.1f%% empty (magenta clear) — %s" % [
+		frac * 100.0, ("PASS" if frac < 0.05 else "FAIL")])
+	if frac >= 0.05:
+		push_error("far-field coverage %.1f%% empty — triangle winding / cull regression" % (frac * 100.0))
 
 # ---------------------------------------------------------------- geometry --
 
@@ -315,24 +726,158 @@ func _mesh_from(d: Dictionary) -> ArrayMesh:
 	m.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arr)
 	return m
 
-func _terrain_material() -> ShaderMaterial:
+func _new_terrain_material() -> ShaderMaterial:
 	var sm := ShaderMaterial.new()
 	sm.shader = load("res://shaders/terrain.gdshader")
 	sm.set_shader_parameter("hab_radius", float(P["radius"]))
+	sm.set_shader_parameter("haze_scale", float(P["length"]) * 0.40)
+	# Key energy matches RamaSun noon product (~1.77); fill stays emission.
+	sm.set_shader_parameter("sun_energy", 1.75)
+	sm.set_shader_parameter("bounce_energy", 0.58)
 	return sm
 
+func _terrain_material() -> ShaderMaterial:
+	# One shared material for every near chunk — N unique ShaderMaterials was
+	# pure GPU/CPU waste (same uniforms, same shader).
+	if _chunk_terrain_mat == null:
+		_chunk_terrain_mat = _new_terrain_material()
+	return _chunk_terrain_mat
+
 func _far_terrain_material() -> ShaderMaterial:
-	var sm := _terrain_material()
-	# Hide coarse far LOD under the near ring, and haze it harder so the
-	# remaining silhouette dissolves instead of reading as a resolution cliff.
-	sm.set_shader_parameter("near_fade_start", NEAR_FADE_START)
-	sm.set_shader_parameter("near_fade_end", NEAR_FADE_END)
+	var sm := _new_terrain_material()
+	# Mid hands off around 650–850 m. Far stays fully under mid until then,
+	# so the two dither bands never punch holes through each other.
+	# In before mid is out: see the note on far_cut_start in _build_mid.
+	sm.set_shader_parameter("near_fade_start", 480.0)
+	sm.set_shader_parameter("near_fade_end", 640.0)
 	sm.set_shader_parameter("haze_start", 90.0)
-	sm.set_shader_parameter("haze_end", 1800.0)
-	sm.set_shader_parameter("haze_max", 0.98)
+	# Extinction distance from the habitat's own size. A fixed 1800 m ramp with
+	# haze_max 0.98 left 2% of the terrain past 1.8 km — in a 6 km drum that is
+	# four kilometres of land washed to one flat colour.
+	sm.set_shader_parameter("haze_scale", float(P["length"]) * 0.40)
+	sm.set_shader_parameter("haze_max", 0.72)
 	return sm
 
 # ------------------------------------------------------------------- build --
+
+func drum_diagonal() -> float:
+	if _drum_diag > 1.0:
+		return _drum_diag
+	var r: float = float(P.get("radius", 900.0))
+	var L: float = float(P.get("length", 6000.0))
+	_drum_diag = sqrt(L * L + (2.0 * r) * (2.0 * r))
+	return _drum_diag
+
+## Local sun approximating the axis strip within the tilt-shift focus band
+## (LANDSCAPE_3200 §AX). Correct nearby; wrong past ~240 m by design.
+func _build_rama_sun() -> void:
+	rama_sun = DirectionalLight3D.new()
+	rama_sun.name = "RamaSun"
+	rama_sun.light_color = Color(1.0, 0.95, 0.86)
+	rama_sun.light_energy = 1.65
+	rama_sun.shadow_enabled = true
+	rama_sun.directional_shadow_mode = DirectionalLight3D.SHADOW_PARALLEL_2_SPLITS
+	# Shadow distance = diorama focus band (~240 m), not drum size (CALIBRATION.md).
+	rama_sun.directional_shadow_max_distance = 240.0
+	rama_sun.directional_shadow_split_1 = 0.12
+	rama_sun.directional_shadow_split_2 = 0.38
+	rama_sun.directional_shadow_blend_splits = true
+	rama_sun.shadow_blur = 1.55
+	rama_sun.shadow_opacity = 0.66
+	rama_sun.light_specular = 0.04
+	# Fade cascades before the far wall so map-shaped shadows never appear.
+	rama_sun.directional_shadow_pancake_size = 12.0
+	add_child(rama_sun)
+
+func _aim_rama_sun() -> void:
+	if rama_sun == null or player == null:
+		return
+	var feet: Vector3 = player.feet_pos()
+	var up := up_at(feet)
+	# Light comes FROM the day-carriage, not from "straight up".
+	#
+	# A strip hung dead along the axis gives every hour of every day the same
+	# dead-overhead noon: no raking light, no long shadows, no form on a
+	# hillside. But the carriage is a segment that TRAVELS, and when it is
+	# still down the habitat the light reaching you arrives at an angle. That
+	# angle is dawn. Aim at the nearest point of the lit segment.
+	var car_half: float = float(P.get("length", 6000.0)) * CARRIAGE_FRAC * 0.5
+	var lit_z: float = clampf(feet.z, carriage_z - car_half, carriage_z + car_half)
+	var to_strip: Vector3 = (Vector3(0.0, 0.0, lit_z) - feet).normalized()
+	# Hold it above the local horizon. Below about twenty degrees a directional
+	# light is all shadow-cascade artefact, and the schedule has already dimmed
+	# it to nothing by then anyway.
+	const MIN_SIN := 0.36
+	var vertical: float = to_strip.dot(up)
+	var horiz: Vector3 = to_strip - up * vertical
+	if vertical < MIN_SIN:
+		var hl: float = horiz.length()
+		if hl > 1e-5:
+			horiz = horiz / hl * sqrt(1.0 - MIN_SIN * MIN_SIN)
+		vertical = MIN_SIN
+	var l_dir: Vector3 = (horiz + up * vertical).normalized()
+	# Godot DirectionalLight shines along local -Z, so +Z points at the light.
+	var ref := Vector3(0, 0, 1)
+	if absf(l_dir.dot(ref)) > 0.95:
+		ref = Vector3(1, 0, 0)
+	var right: Vector3 = ref.cross(l_dir).normalized()
+	var bitangent: Vector3 = l_dir.cross(right).normalized()
+	rama_sun.global_transform = Transform3D(
+			Basis(right, bitangent, l_dir), feet + l_dir * 60.0)
+	var warm := Color(1.0, 0.94, 0.80).lerp(Color(1.0, 0.55, 0.32), 1.0 - day)
+	rama_sun.light_color = warm
+	# Bright when the day-carriage is overhead; dim when it's far along z.
+	var prox := 1.0
+	if P.has("length"):
+		prox = 1.0 - clampf(absf(player.z - carriage_z) / CARRIAGE_PROX_M, 0.0, 1.0)
+	prox = prox * prox  # sharper overhead falloff
+	var local := 0.28 + 0.72 * prox
+	rama_sun.light_energy = (0.18 + 1.55 * day) * local
+	rama_sun.shadow_opacity = (0.22 + 0.48 * day) * (0.45 + 0.55 * prox)
+
+## Mean linear albedo of the opposite wall → bounce tint (§691 / Wave 4 id map).
+func _refresh_bounce_tint() -> void:
+	if terrain == null:
+		return
+	if bounce_map.is_empty():
+		bounce_map = terrain.biome_id_map(96, 64)
+	if bounce_map.is_empty() or player == null:
+		return
+	# Biome → authored sRGB albedo (matches paint / BIOME_PLANT roughly).
+	var pal := [
+		Color(0.12, 0.28, 0.36), # water
+		Color(0.14, 0.36, 0.22), # wetland
+		Color(0.12, 0.40, 0.18), # riparian
+		Color(0.14, 0.32, 0.11), # grassland
+		Color(0.38, 0.36, 0.14), # scrub
+		Color(0.08, 0.28, 0.12), # forest
+		Color(0.55, 0.52, 0.42), # alpine
+		Color(0.48, 0.44, 0.38), # bare rock
+		Color(0.22, 0.42, 0.16), # farm
+	]
+	var nt := 96
+	var nz := 64
+	var th0: float = player.theta
+	var sum := Vector3.ZERO
+	var count := 0
+	for zi in nz:
+		for ti in nt:
+			var th: float = float(ti) / float(nt) * TAU
+			# Opposite half of the drum.
+			var dth: float = absf(wrapf(th - th0, -PI, PI))
+			if dth < PI * 0.45:
+				continue
+			var id: int = clampi(int(bounce_map[zi * nt + ti]), 0, pal.size() - 1)
+			var c: Color = pal[id]
+			# Approximate srgb→linear with the contract gamma.
+			sum += Vector3(pow(c.r, 1.95), pow(c.g, 1.95), pow(c.b, 1.95))
+			count += 1
+	if count < 1:
+		return
+	var mean := sum / float(count)
+	# Keep it in bounce range so energy doesn't blow out.
+	mean = mean.lerp(Vector3(0.38, 0.48, 0.36), 0.25)
+	RenderingServer.global_shader_parameter_set("rama_bounce_tint", mean)
 
 func _build_env() -> void:
 	world_env = WorldEnvironment.new()
@@ -343,34 +888,39 @@ func _build_env() -> void:
 	var air := Color(0.16, 0.22, 0.28)
 	env.background_color = air
 	env.ambient_light_source = Environment.AMBIENT_SOURCE_COLOR
-	env.ambient_light_color = Color(0.26, 0.32, 0.34)
-	env.ambient_light_energy = 0.42
+	env.ambient_light_color = Color(0.28, 0.34, 0.36)
+	env.ambient_light_energy = 0.48
 	env.tonemap_mode = Environment.TONE_MAPPER_FILMIC
-	env.tonemap_exposure = 0.88
-	# Tighter glow: raised threshold only catches axis strip and emissives.
-	# Lower bloom prevents midtone wash that made the scene milky.
+	env.tonemap_exposure = 0.92
+	# Glow catches the axis strip and window emissives — shafts of light
+	# without a volumetric pass. Keep bloom low so midtones stay grounded.
 	env.glow_enabled = true
-	env.glow_intensity = 0.24
-	env.glow_bloom = 0.04
-	env.glow_hdr_threshold = 1.4
-	env.glow_hdr_scale = 0.7
+	env.glow_intensity = 0.30
+	env.glow_bloom = 0.055
+	env.glow_hdr_threshold = 1.25
+	env.glow_hdr_scale = 0.85
 	# Engine fog fills EMPTY air (shader haze only tints geometry). This is what
 	# softens the jagged horizon and the endcap rim into the distance.
 	env.fog_enabled = true
 	env.fog_mode = Environment.FOG_MODE_DEPTH
 	env.fog_light_color = air
-	env.fog_light_energy = 1.08
-	env.fog_density = 0.0007
-	env.fog_aerial_perspective = 0.55
+	env.fog_light_energy = 1.12
+	env.fog_density = 0.00065
+	env.fog_aerial_perspective = 0.42
 	env.fog_sky_affect = 1.0
-	env.fog_sun_scatter = 0.06
+	env.fog_sun_scatter = 0.10
 	# Sharper near-clear / far-fade profile. Makes the tilt-shift focus band
 	# pop harder against the soft far field.
-	env.fog_depth_curve = 0.55
 	# Start earlier so coarse far silhouettes dissolve before they read as
 	# black saw-teeth against the sky.
-	env.fog_depth_begin = 100.0
-	env.fog_depth_end = 1800.0
+	env.fog_depth_begin = 90.0
+	# Depth fog reaches FULL strength at depth_end and stays there. At 1900 m in
+	# a 6.3 km drum that painted every metre past 1.9 km in exactly the
+	# background colour — which is why the far half of the habitat read as
+	# "not rendering" when the geometry was there and correctly lit the whole
+	# time. Derive it from the drum, and never let it saturate.
+	env.fog_depth_end = drum_diagonal() * 1.15
+	env.fog_depth_curve = 0.75
 	world_env.environment = env
 	add_child(world_env)
 
@@ -433,8 +983,11 @@ func _build_water() -> void:
 	mi.mesh = st.commit()
 	var sm := ShaderMaterial.new()
 	sm.shader = load("res://shaders/water.gdshader")
-	var mimg := Image.create_from_data(512, 320, false, Image.FORMAT_R8,
-			terrain.lake_mask(512, 320))
+	var mimg := Image.create_from_data(1024, 640, false, Image.FORMAT_R8,
+			terrain.lake_mask(1024, 640))
+	# Without mipmaps this minifies into hard blocks across the far side —
+	# which is the checkerboard that showed up on the endcap.
+	mimg.generate_mipmaps()
 	var mtex := ImageTexture.create_from_image(mimg)
 	sm.set_shader_parameter("lake_mask", mtex)
 	sm.set_shader_parameter("hab_len", float(P["length"]))
@@ -467,8 +1020,8 @@ func _build_rivers() -> void:
 			continue
 		var up := Vector3(-a.x, -a.y, 0.0).normalized()
 		var side := along.cross(up).normalized() * (w * 0.5)
-		# Sit tighter on the bed so ribbons don't float as blue tiles.
-		var up_lift := up * 0.02
+		# Sit above the bed so ribbons don't z-fight into dark tiles.
+		var up_lift := up * 0.08
 		var p0 := a - side + up_lift
 		var p1 := a + side + up_lift
 		var p2 := b + side + up_lift
@@ -487,26 +1040,65 @@ func _build_rivers() -> void:
 
 ## Standing water free surfaces — Minecraft-style flat pools in basins.
 ## Ground cover: ONE MultiMesh, one draw call, shadows off, rebuilt only when
-## the player has actually moved. 2600 tufts x 4 tris is nothing next to the
+## the player has actually moved. 6400 tufts x ~10 tris is nothing next to the
 ## 215k the terrain already costs.
+## The second LOD tier: one mesh covering the band between the near chunks and
+## the coarse far field, which was previously a flat plate.
+func _build_mid() -> void:
+	mid_mi = MeshInstance3D.new()
+	var mat := _new_terrain_material()
+	# Near chunks retire ~120–275 m. Mid stays solid under them, then dissolves
+	# into far past ~650 m — no overlapping dither with the far field.
+	mat.set_shader_parameter("near_fade_start", 105.0)
+	mat.set_shader_parameter("near_fade_end", 175.0)
+	# The far field must be FULLY faded in before mid starts dissolving. It used
+	# to dissolve from 0.42 of the window while far only began at 720 m, so for
+	# ninety metres neither tier was solid and the dither showed the void behind
+	# both — the checkerboard along every distant shoreline.
+	mat.set_shader_parameter("far_cut_start", mid_span_eff * 0.44)
+	mat.set_shader_parameter("far_cut_end", mid_span_eff * 0.56)
+	mat.set_shader_parameter("haze_start", 150.0)
+	mat.set_shader_parameter("haze_scale", float(P["length"]) * 0.40)
+	mid_mi.material_override = mat
+	mid_mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	mid_mi.name = "MidField"
+	add_child(mid_mi)
+	refresh_mid(true)
+
+func refresh_mid(force := false) -> void:
+	if mid_mi == null or player == null or terrain == null:
+		return
+	var here := Vector2(player.theta * float(P["radius"]), player.z)
+	if not force and here.distance_to(mid_anchor) < MID_MOVE:
+		return
+	mid_anchor = here
+	var d: Dictionary = terrain.mid_mesh(player.theta, player.z, mid_span_eff, MID_N)
+	var m := _mesh_from(d)
+	if m != null:
+		mid_mi.mesh = m
+		if force:
+			print("[rama] mid field: %d tris, 1 draw call" % (d["indices"].size() / 3))
+
 func _build_grass() -> void:
 	var mm := MultiMesh.new()
 	mm.transform_format = MultiMesh.TRANSFORM_3D
 	mm.use_colors = true
-	# Three crossed blades, each TAPERED to a point. A rectangle reads as a
-	# card; a taper reads as grass. Six triangles per tuft.
+	# Five tapered blades at uneven angles. More crossings = denser silhouette
+	# without more draw calls; irregular spacing kills the "fan card" read.
 	var st := SurfaceTool.new()
 	st.begin(Mesh.PRIMITIVE_TRIANGLES)
-	for blade in 3:
-		var ang: float = PI / 3.0 * float(blade)
-		var dx := cos(ang) * 0.5
-		var dz := sin(ang) * 0.5
-		var nrm := Vector3(-sin(ang), 0.45, cos(ang)).normalized()
-		# Wide at the base, pinched at the tip.
+	var blade_angs := [0.0, 0.55, 1.15, 2.05, 2.75]
+	for bi in blade_angs.size():
+		var ang: float = float(blade_angs[bi])
+		var lean: float = 0.92 + float(bi % 3) * 0.06
+		var dx := cos(ang) * 0.48
+		var dz := sin(ang) * 0.48
+		var nrm := Vector3(-sin(ang), 0.42, cos(ang)).normalized()
 		var b0 := Vector3(-dx, 0.0, -dz)
 		var b1 := Vector3(dx, 0.0, dz)
-		var t0 := Vector3(-dx * 0.18, 1.0, -dz * 0.18)
-		var t1 := Vector3(dx * 0.18, 1.0, dz * 0.18)
+		var tip_h := lean
+		var t0 := Vector3(-dx * 0.12, tip_h, -dz * 0.12)
+		var t1 := Vector3(dx * 0.12, tip_h, dz * 0.12)
 		for vtx in [b0, b1, t1, b0, t1, t0]:
 			st.set_normal(nrm)
 			st.add_vertex(vtx)
@@ -523,6 +1115,23 @@ func _build_grass() -> void:
 	grass_mm.name = "Grass"
 	add_child(grass_mm)
 
+const BIOME_GRASS_COL := [
+	Color(0.18, 0.38, 0.32), # water edge
+	Color(0.10, 0.38, 0.22), # wetland — deep
+	Color(0.16, 0.46, 0.18), # riparian
+	Color(0.22, 0.42, 0.14), # grassland
+	Color(0.46, 0.40, 0.16), # scrub — straw
+	Color(0.08, 0.28, 0.10), # forest understorey
+	Color(0.34, 0.36, 0.26), # alpine — grey-green
+	Color(0.40, 0.36, 0.28), # bare rock sparse
+	Color(0.28, 0.48, 0.16), # farm
+	Color(0.12, 0.30, 0.20), # swamp — peat olive
+	Color(0.30, 0.54, 0.18), # meadow — bright herb
+	Color(0.62, 0.50, 0.30), # desert
+	Color(0.76, 0.62, 0.36), # dune — warm gold
+	Color(0.72, 0.66, 0.48), # shore
+]
+
 func refresh_grass(force := false) -> void:
 	if grass_mm == null or player == null or terrain == null:
 		return
@@ -531,32 +1140,63 @@ func refresh_grass(force := false) -> void:
 		return
 	grass_anchor = here
 	var buf: PackedFloat32Array = terrain.grass_field(
-			player.theta, player.z, GRASS_RADIUS, GRASS_N)
-	var n: int = int(buf.size() / 5.0)
-	grass_mm.multimesh.instance_count = n
+			player.theta, player.z, grass_radius_cap, grass_n_cap)
+	var stride: int = GRASS_STRIDE if buf.size() % GRASS_STRIDE == 0 else 5
+	var n: int = int(buf.size() / float(stride))
+	# Build buffer once — Wave 1.7 upload path.
+	var xforms: Array[Transform3D] = []
+	var cols: Array[Color] = []
+	xforms.resize(n)
+	cols.resize(n)
 	for i in n:
-		var th: float = buf[i * 5]
-		var zz: float = buf[i * 5 + 1]
-		var rr: float = buf[i * 5 + 2]
-		var sc: float = buf[i * 5 + 3]
-		var lush: float = buf[i * 5 + 4]
+		var th: float = buf[i * stride]
+		var zz: float = buf[i * stride + 1]
+		var rr: float = buf[i * stride + 2]
+		var sc: float = buf[i * stride + 3]
+		var lush: float = buf[i * stride + 4]
+		var bid: int = 3
+		if stride >= 6:
+			bid = clampi(int(buf[i * stride + 5]), 0, BIOME_GRASS_COL.size() - 1)
 		var xf := frame_at(th, zz, rr)
-		# Ankle-to-knee, not hedge-height. Width well under height so a tuft
-		# reads as blades rather than as a billboard.
-		# Random yaw per tuft. Without this every blade faces the same way and
-		# the field reads as a printed grid rather than as ground cover.
 		var yaw: float = fposmod(sc * 97.31 + lush * 41.7, 1.0) * TAU
 		xf.basis = xf.basis.rotated(xf.basis.y, yaw)
-		var hgt: float = 0.13 + lush * 0.20 + fposmod(sc * 13.7, 1.0) * 0.09
-		xf.basis = xf.basis.scaled(Vector3(hgt * 0.75, hgt, hgt * 0.75))
-		grass_mm.multimesh.set_instance_transform(i, xf)
-		# Lush ground is greener and darker; dry ground is paler and yellower.
+		var lean: float = (fposmod(sc * 19.3, 1.0) - 0.5) * 0.22
+		xf.basis = xf.basis.rotated(xf.basis.z, lean)
+		# Biome height: wetland/swamp taller, meadow lush, alpine/scrub/desert shorter.
+		var h_mul := 1.0
+		match bid:
+			1, 9: h_mul = 1.40
+			10: h_mul = 1.18
+			4, 6, 7: h_mul = 0.62
+			5: h_mul = 0.78
+			8: h_mul = 0.90
+			11, 12: h_mul = 0.35
+			13: h_mul = 0.55
+		var hgt: float = (0.14 + lush * 0.26 + fposmod(sc * 13.7, 1.0) * 0.12) * h_mul
+		var w: float = hgt * (0.62 + fposmod(sc * 5.9, 1.0) * 0.28)
+		xf.basis = xf.basis.scaled(Vector3(w, hgt, w))
+		xforms[i] = xf
+		var base: Color = BIOME_GRASS_COL[bid]
+		# Dry grass leans straw, but only half way: full lerp put gold stubble on
+		# ground the paint table had already coloured deep green, and the tufts
+		# read as a different biome from the field they stand in.
+		var col := base.lerp(Color(0.55, 0.48, 0.22), (1.0 - lush) * 0.55)
 		var tone: float = fposmod(sc * 7.13, 1.0)
-		var col := Color(0.26, 0.44, 0.17).lerp(Color(0.52, 0.50, 0.24), 1.0 - lush)
-		col = col.lerp(Color(0.34, 0.52, 0.22), tone * 0.55)
-		grass_mm.multimesh.set_instance_color(i, col)
+		col = col.lerp(base.lightened(0.12), tone * 0.35)
+		col.r += (tone - 0.5) * 0.05
+		# Meadow wildflower flecks; swamp stays cool olive.
+		if bid == 10 and tone > 0.72:
+			col = col.lerp(Color(0.72, 0.42, 0.55), 0.28)
+		elif bid == 9:
+			col = col.lerp(Color(0.10, 0.28, 0.18), 0.22)
+		cols[i] = col
+	grass_mm.multimesh.instance_count = n
+	for i in n:
+		grass_mm.multimesh.set_instance_transform(i, xforms[i])
+		grass_mm.multimesh.set_instance_color(i, cols[i])
 	if n > 0 and Engine.get_process_frames() < 4:
-		print("[rama] grass: %d tufts (%d tris), 1 draw call" % [n, n * 4])
+		print("[rama] grass: %d tufts within %.0f m" % [n, grass_radius_cap])
+		print("[rama] grass: %d tufts (%d tris), 1 draw call" % [n, n * 10])
 
 func _build_pools() -> void:
 	if lake_root and is_instance_valid(lake_root):
@@ -621,7 +1261,7 @@ func _refresh_foam() -> void:
 		return
 	# Prefer thin shore (0.12–0.9 m) so Multimesh foam sits on the contact
 	# line that the depth-shore shader already paints.
-	var pts: PackedFloat32Array = terrain.shore_points(player.theta, player.z, 110.0, 160)
+	var pts: PackedFloat32Array = terrain.shore_points(player.theta, player.z, 140.0, 220)
 	var n: int = int(pts.size() / 3.0)
 	if n < 1:
 		foam_mm.multimesh.instance_count = 0
@@ -635,23 +1275,331 @@ func _refresh_foam() -> void:
 		var r: float = gr - dep * 0.95
 		var xf := frame_at(th, zz, r)
 		# Flatter, wider discs along the waterline.
-		var s: float = clampf(0.85 + (1.0 - clampf(dep / 1.2, 0.0, 1.0)) * 0.9, 0.7, 2.4)
-		xf.basis = xf.basis.scaled(Vector3(s, 0.22, s))
+		var s: float = clampf(1.05 + (1.0 - clampf(dep / 1.2, 0.0, 1.0)) * 1.15, 0.85, 3.0)
+		xf.basis = xf.basis.scaled(Vector3(s, 0.18, s))
 		foam_mm.multimesh.set_instance_transform(i, xf)
 		var edge: float = 1.0 - clampf(abs(dep - 0.35) / 0.55, 0.0, 1.0)
-		var a: float = clampf(0.18 + edge * 0.55, 0.15, 0.72)
-		foam_mm.multimesh.set_instance_color(i, Color(0.90, 0.95, 0.98, a))
+		var a: float = clampf(0.22 + edge * 0.58, 0.18, 0.78)
+		# Wet sand halo — cooler than dry bank foam (Wave 6).
+		var wet := Color(0.68, 0.76, 0.72, a * 0.9)
+		var dry := Color(0.92, 0.97, 1.0, a)
+		foam_mm.multimesh.set_instance_color(i, wet.lerp(dry, clampf(dep / 0.9, 0.0, 1.0)))
+
+func _build_litter() -> void:
+	# Leaf litter + signature rocks/reeds — ground that isn't bare Multimesh grass.
+	var mm := MultiMesh.new()
+	mm.transform_format = MultiMesh.TRANSFORM_3D
+	mm.use_colors = true
+	var st := SurfaceTool.new()
+	st.begin(Mesh.PRIMITIVE_TRIANGLES)
+	# WHITE, not a leaf tone. A MultiMesh instance colour MULTIPLIES the source
+	# mesh's vertex colour, and prop.gdshader then raises the product to 1.95.
+	# Litter authored at 0.3 x an instance at 0.3 landed at 0.008 linear — the
+	# black pebbles scattered over every grassland. (RENDER_CONTRACT §2009.)
+	_add_prism(st, Vector3(0, 0.04, 0), Vector3(0.35, 0.06, 0.22), Color.WHITE)
+	st.generate_normals()
+	mm.mesh = st.commit()
+	mm.instance_count = 0
+	litter_mm = MultiMeshInstance3D.new()
+	litter_mm.multimesh = mm
+	var mat := ShaderMaterial.new()
+	mat.shader = load("res://shaders/prop.gdshader")
+	mat.set_shader_parameter("haze_start", 40.0)
+	mat.set_shader_parameter("haze_end", 160.0)
+	litter_mm.material_override = mat
+	litter_mm.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	litter_mm.name = "Litter"
+	add_child(litter_mm)
+
+	var rm := MultiMesh.new()
+	rm.transform_format = MultiMesh.TRANSFORM_3D
+	rm.use_colors = true
+	var rst := SurfaceTool.new()
+	rst.begin(Mesh.PRIMITIVE_TRIANGLES)
+	_add_prism(rst, Vector3(0, 0.18, 0), Vector3(0.55, 0.35, 0.40), Color.WHITE)
+	rst.generate_normals()
+	rm.mesh = rst.commit()
+	rm.instance_count = 0
+	rock_prop_mm = MultiMeshInstance3D.new()
+	rock_prop_mm.multimesh = rm
+	var rmat := ShaderMaterial.new()
+	rmat.shader = load("res://shaders/prop.gdshader")
+	rmat.set_shader_parameter("haze_start", 55.0)
+	rmat.set_shader_parameter("haze_end", 220.0)
+	rock_prop_mm.material_override = rmat
+	rock_prop_mm.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	rock_prop_mm.name = "SignatureRocks"
+	add_child(rock_prop_mm)
+
+	var reed := MultiMesh.new()
+	reed.transform_format = MultiMesh.TRANSFORM_3D
+	reed.use_colors = true
+	var rst2 := SurfaceTool.new()
+	rst2.begin(Mesh.PRIMITIVE_TRIANGLES)
+	_add_prism(rst2, Vector3(0, 0.55, 0), Vector3(0.06, 1.1, 0.06), Color.WHITE)
+	# Second stem a shade darker — a RATIO against the instance colour, not a
+	# second absolute green.
+	_add_prism(rst2, Vector3(0.08, 0.45, 0.04), Vector3(0.05, 0.9, 0.05), Color(0.88, 0.90, 0.88))
+	rst2.generate_normals()
+	reed.mesh = rst2.commit()
+	reed.instance_count = 0
+	reed_mm = MultiMeshInstance3D.new()
+	reed_mm.multimesh = reed
+	var reed_mat := ShaderMaterial.new()
+	reed_mat.shader = load("res://shaders/tree.gdshader")
+	reed_mat.set_shader_parameter("haze_start", 50.0)
+	reed_mat.set_shader_parameter("haze_end", 200.0)
+	reed_mat.set_shader_parameter("fade_start", 90.0)
+	reed_mat.set_shader_parameter("fade_end", 180.0)
+	reed_mat.set_shader_parameter("model_height", 1.2)
+	reed_mat.set_shader_parameter("sway", 0.16)
+	reed_mm.material_override = reed_mat
+	reed_mm.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	reed_mm.name = "Reeds"
+	add_child(reed_mm)
+
+func _refresh_litter() -> void:
+	if litter_mm == null or player == null or terrain == null:
+		return
+	var buf: PackedFloat32Array = terrain.grass_field(player.theta, player.z, 28.0, 900)
+	var stride: int = 6 if buf.size() % 6 == 0 else 5
+	var n: int = int(buf.size() / float(stride))
+	var litter_xf: Array = []
+	var litter_col: Array = []
+	var rock_xf: Array = []
+	var rock_col: Array = []
+	var reed_xf: Array = []
+	var reed_col: Array = []
+	for i in n:
+		var th: float = buf[i * stride]
+		var zz: float = buf[i * stride + 1]
+		var gr: float = buf[i * stride + 2]
+		var lush: float = buf[i * stride + 4] if stride >= 5 else 0.5
+		var bid: int = clampi(int(buf[i * stride + 5]), 0, BIOME_GRASS_COL.size() - 1) if stride >= 6 else 3
+		var h: float = _dhash(int(th * 1000.0), int(zz * 10.0))
+		# Wetland / riparian / swamp → denser reeds in swamp.
+		if bid == 1 or bid == 2 or bid == 9:
+			var reed_gate := 0.48 if bid == 9 else 0.62
+			if h > reed_gate:
+				continue
+			var xf := frame_at(th, zz, gr)
+			var sc: float = (0.85 if bid == 9 else 0.7) + lush * 0.7
+			xf.basis = xf.basis.scaled(Vector3(sc * 0.32, sc * (1.15 if bid == 9 else 1.0), sc * 0.32))
+			reed_xf.append(xf)
+			if bid == 9:
+				reed_col.append(Color(0.10 + lush * 0.06, 0.32 + lush * 0.08, 0.16))
+			else:
+				reed_col.append(Color(0.14 + lush * 0.08, 0.38 + lush * 0.10, 0.18))
+		elif bid == 10:
+			# Meadow — flower flecks + pale thatch, not dark leaf litter.
+			if h > 0.38:
+				continue
+			var lxf := frame_at(th, zz, gr + 0.02)
+			var ls: float = 0.35 + lush * 0.45
+			lxf.basis = lxf.basis.rotated(lxf.basis.y, h * TAU)
+			lxf.basis = lxf.basis.scaled(Vector3(ls, 0.55, ls * 0.7))
+			litter_xf.append(lxf)
+			if h > 0.55:
+				litter_col.append(Color(0.78, 0.48, 0.62)) # wildflower
+			else:
+				litter_col.append(Color(0.48, 0.52, 0.28)) # thatch
+		elif bid == 6 or bid == 7 or bid == 11 or bid == 12:
+			# Alpine / rock / desert / dune → rocks (sparse in desert).
+			if bid >= 11 and h > 0.18:
+				continue
+			if bid < 11 and h > 0.28:
+				continue
+			var rxf := frame_at(th, zz, gr)
+			var rs: float = 0.55 + h * 1.1
+			rxf.basis = rxf.basis.rotated(rxf.basis.y, h * TAU)
+			rxf.basis = rxf.basis.scaled(Vector3(rs, rs * 0.7, rs))
+			rock_xf.append(rxf)
+			if bid >= 11:
+				rock_col.append(Color(0.62 + h * 0.08, 0.52, 0.34))
+			else:
+				rock_col.append(Color(0.46 + h * 0.08, 0.42, 0.36))
+		elif bid == 13:
+			# Shore litter — sparse pale shells/sticks.
+			if h > 0.35:
+				continue
+			var lxf := frame_at(th, zz, gr + 0.02)
+			var ls: float = 0.35 + lush * 0.4
+			lxf.basis = lxf.basis.scaled(Vector3(ls, 0.5, ls * 0.7))
+			litter_xf.append(lxf)
+			litter_col.append(Color(0.62, 0.56, 0.42))
+		else:
+			if h > 0.22 + lush * 0.25:
+				continue
+			var lxf := frame_at(th, zz, gr + 0.02)
+			var ls: float = 0.45 + lush * 0.55
+			lxf.basis = lxf.basis.rotated(lxf.basis.y, h * TAU)
+			lxf.basis = lxf.basis.scaled(Vector3(ls, 1.0, ls * 0.7))
+			litter_xf.append(lxf)
+			litter_col.append(Color(0.30 + lush * 0.08, 0.24 + lush * 0.06, 0.14))
+	_fill_mm(litter_mm, litter_xf, litter_col)
+	_fill_mm(rock_prop_mm, rock_xf, rock_col)
+	_fill_mm(reed_mm, reed_xf, reed_col)
+
+func _fill_mm(mi: MultiMeshInstance3D, xfs: Array, cols: Array) -> void:
+	if mi == null:
+		return
+	var n: int = mini(xfs.size(), 400)
+	mi.multimesh.instance_count = n
+	for i in n:
+		mi.multimesh.set_instance_transform(i, xfs[i])
+		mi.multimesh.set_instance_color(i, cols[i])
+
+func _build_rain() -> void:
+	# Rain curtains under condensers — thin vertical streaks (Wave 7 / NEXT #9).
+	# feature: streak length ~4–8 m; retire past ~180 m
+	var mm := MultiMesh.new()
+	mm.transform_format = MultiMesh.TRANSFORM_3D
+	mm.use_colors = true
+	var qm := QuadMesh.new()
+	qm.size = Vector2(0.08, 5.5)
+	mm.mesh = qm
+	mm.instance_count = 0
+	rain_mm = MultiMeshInstance3D.new()
+	rain_mm.multimesh = mm
+	var mat := StandardMaterial3D.new()
+	mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	mat.vertex_color_use_as_albedo = true
+	mat.billboard_mode = BaseMaterial3D.BILLBOARD_ENABLED
+	mat.distance_fade_mode = BaseMaterial3D.DISTANCE_FADE_PIXEL_DITHER
+	mat.distance_fade_min_distance = 90.0
+	mat.distance_fade_max_distance = 180.0
+	rain_mm.material_override = mat
+	rain_mm.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	rain_mm.name = "RainCurtains"
+	add_child(rain_mm)
+
+func _refresh_rain() -> void:
+	if rain_mm == null or terrain == null or player == null:
+		return
+	var storm_i: float = sky_intensity if sky_event == 2 else 0.0
+	var buf: PackedFloat32Array = terrain.condensers_lod()
+	var nc: int = int(buf.size() / 4.0)
+	# Quiet weather with no nearby condensers — clear and bail.
+	if storm_i < 0.05 and nc < 1:
+		rain_mm.multimesh.instance_count = 0
+		return
+	var streaks: Array = []
+	var cols: Array = []
+	var R: float = float(P["radius"])
+	var max_total := 96 if storm_i > 0.08 else 64
+	for c in nc:
+		if streaks.size() >= max_total:
+			break
+		var th: float = buf[c * 4]
+		var zz: float = buf[c * 4 + 1]
+		var power: float = buf[c * 4 + 2]
+		var rad: float = maxf(buf[c * 4 + 3], 8.0)
+		var dth: float = absf(wrapf(th - player.theta, -PI, PI)) * R
+		var dz: float = absf(zz - player.z)
+		if dth * dth + dz * dz > 180.0 * 180.0:
+			continue
+		# One ground sample per condenser — per-streak FFI was a hitch farm.
+		var gr0: float = terrain.ground_radius(th, zz)
+		var n_s: int = clampi(int(4.0 + power * 7.0 + storm_i * 8.0), 3, 18)
+		n_s = mini(n_s, max_total - streaks.size())
+		for s in n_s:
+			var h: float = _dhash(c * 97 + s, int(zz * 3.0))
+			var ath: float = th + ((h - 0.5) * 2.0 * rad) / R
+			var az: float = zz + (_dhash(s, c) - 0.5) * rad * 1.4
+			var loft: float = 2.0 + h * 6.0
+			var xf := frame_at(ath, az, gr0 - loft)
+			var fall: float = 1.0 + h * 0.8 + storm_i * 0.7
+			xf.basis = xf.basis.scaled(Vector3(0.7 + power * 0.2, fall, 0.7))
+			streaks.append(xf)
+			var a: float = clampf(0.12 + power * 0.25 + storm_i * 0.18, 0.10, 0.48)
+			cols.append(Color(0.72, 0.82, 0.92, a))
+	# Ambient storm curtains — approximate height from player.r (no FFI).
+	if storm_i > 0.08 and streaks.size() < max_total:
+		var n_amb: int = clampi(int(10.0 + storm_i * 28.0), 8, 32)
+		n_amb = mini(n_amb, max_total - streaks.size())
+		var gr_p: float = player.r
+		for s in n_amb:
+			var h: float = _dhash(s * 13 + 7, int(player.z) + s)
+			var ath: float = player.theta + ((h - 0.5) * 2.0 * 85.0) / R
+			var az: float = player.z + (_dhash(s, 41) - 0.5) * 120.0
+			var loft: float = 3.0 + h * 8.0
+			var xf := frame_at(ath, az, gr_p - loft)
+			var fall: float = 1.3 + h * 0.9 + storm_i * 0.7
+			xf.basis = xf.basis.scaled(Vector3(0.55, fall, 0.55))
+			streaks.append(xf)
+			cols.append(Color(0.68, 0.78, 0.90, 0.14 + storm_i * 0.24))
+	if streaks.is_empty():
+		rain_mm.multimesh.instance_count = 0
+		return
+	_fill_mm(rain_mm, streaks, cols)
+
+func _build_grazers() -> void:
+	var mm := MultiMesh.new()
+	mm.transform_format = MultiMesh.TRANSFORM_3D
+	mm.use_colors = true
+	var body := CapsuleMesh.new()
+	body.radius = 0.22
+	body.height = 0.85
+	body.radial_segments = 6
+	body.rings = 2
+	mm.mesh = body
+	mm.instance_count = 0
+	grazer_mm = MultiMeshInstance3D.new()
+	grazer_mm.multimesh = mm
+	var mat := ShaderMaterial.new()
+	mat.shader = load("res://shaders/prop.gdshader")
+	mat.set_shader_parameter("haze_start", 60.0)
+	mat.set_shader_parameter("haze_end", 240.0)
+	grazer_mm.material_override = mat
+	grazer_mm.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	grazer_mm.name = "Grazers"
+	add_child(grazer_mm)
+
+func _refresh_grazers() -> void:
+	if grazer_mm == null or player == null or terrain == null:
+		return
+	var buf: PackedFloat32Array = terrain.grazer_field(player.theta, player.z, 95.0, 80)
+	var n: int = mini(int(buf.size() / 5.0), 80)
+	grazer_mm.multimesh.instance_count = n
+	var R: float = float(P["radius"])
+	for i in n:
+		var th: float = buf[i * 5]
+		var zz: float = buf[i * 5 + 1]
+		var dens: float = buf[i * 5 + 2]
+		var fear: float = buf[i * 5 + 3]
+		var mass: float = buf[i * 5 + 4]
+		var ph: float = clock * (0.35 + dens * 0.4) + float(i) * 1.7
+		var ath: float = th + cos(ph) * 1.8 * (1.0 - fear) / R
+		var az: float = zz + sin(ph * 0.9) * 2.2 * (1.0 - fear)
+		# Sample ground at the cell centre, not the jittered orbit — cuts FFI in half
+		# visually and the animals still read as grazing.
+		var gr: float = terrain.ground_radius(th, zz)
+		var xf := frame_at(ath, az, gr)
+		var sc: float = clampf(0.55 + mass / 120.0, 0.45, 1.35)
+		xf.basis = xf.basis.scaled(Vector3(sc, sc, sc * 1.15))
+		grazer_mm.multimesh.set_instance_transform(i, xf)
+		var warm: float = dens * (1.0 - fear * 0.5)
+		grazer_mm.multimesh.set_instance_color(i, Color(
+				0.42 + warm * 0.12, 0.34 + warm * 0.06, 0.24))
 
 func _build_splash() -> void:
 	var mm := MultiMesh.new()
 	mm.transform_format = MultiMesh.TRANSFORM_3D
 	mm.use_colors = true
-	var ball := SphereMesh.new()
-	ball.radius = 0.14
-	ball.height = 0.28
-	ball.radial_segments = 6
-	ball.rings = 3
-	mm.mesh = ball
+	# Chips of thrown material, not droplets. Two crossed triangles read as
+	# angular debris and cost four verts.
+	var cst := SurfaceTool.new()
+	cst.begin(Mesh.PRIMITIVE_TRIANGLES)
+	for k in 2:
+		var a: float = PI * 0.5 * float(k)
+		var dx := cos(a) * 0.16
+		var dz := sin(a) * 0.16
+		var nn := Vector3(-sin(a), 0.5, cos(a)).normalized()
+		for v in [Vector3(-dx, 0.0, -dz), Vector3(dx, 0.0, dz), Vector3(0.0, 0.26, 0.0)]:
+			cst.set_normal(nn)
+			cst.add_vertex(v)
+	mm.mesh = cst.commit()
 	# Start empty — lingering instance transforms used to reappear as orphan
 	# "dig bubbles" after the burst finished.
 	mm.instance_count = 0
@@ -672,13 +1620,32 @@ func _build_stockpiles() -> void:
 	var mm := MultiMesh.new()
 	mm.transform_format = MultiMesh.TRANSFORM_3D
 	mm.use_colors = true
-	# Flatter mound — sphere stacks used to read as a tan debug blob.
-	var heap := SphereMesh.new()
-	heap.radius = 0.52
-	heap.height = 0.55
-	heap.radial_segments = 12
-	heap.rings = 6
-	mm.mesh = heap
+	# A dug heap is angular rubble, not a ball. A SphereMesh here is what made
+	# excavation leave rows of pale eggs on the ground.
+	var st := SurfaceTool.new()
+	st.begin(Mesh.PRIMITIVE_TRIANGLES)
+	var sides := 7
+	var rng0 := RandomNumberGenerator.new()
+	rng0.seed = 5150
+	var rim: Array = []
+	for i in sides:
+		var a: float = TAU * float(i) / float(sides)
+		var rr: float = 0.42 + rng0.randf() * 0.16
+		rim.append(Vector3(cos(a) * rr, rng0.randf() * 0.06, sin(a) * rr))
+	var apex := Vector3(rng0.randf_range(-0.06, 0.06), 0.52,
+			rng0.randf_range(-0.06, 0.06))
+	for i in sides:
+		var p0: Vector3 = rim[i]
+		var p1: Vector3 = rim[(i + 1) % sides]
+		# Side face up to the apex, then a floor triangle so it is closed.
+		var n1 := (p1 - p0).cross(apex - p0).normalized()
+		for v in [p0, p1, apex]:
+			st.set_normal(n1)
+			st.add_vertex(v)
+		for v in [p1, p0, Vector3(0, 0, 0)]:
+			st.set_normal(Vector3.DOWN)
+			st.add_vertex(v)
+	mm.mesh = st.commit()
 	mm.instance_count = 0
 	stockpile_mm = MultiMeshInstance3D.new()
 	stockpile_mm.multimesh = mm
@@ -691,25 +1658,43 @@ func _build_stockpiles() -> void:
 
 ## Agent colonists — same body cue as a spoil mark, taller (LANDSCAPE_2000 Wave 1).
 func _build_agents() -> void:
-	var mm := MultiMesh.new()
-	mm.transform_format = MultiMesh.TRANSFORM_3D
-	mm.use_colors = true
-	var body := CapsuleMesh.new()
-	body.radius = 0.28
-	body.height = 1.45
-	body.radial_segments = 8
-	body.rings = 2
-	mm.mesh = body
-	mm.instance_count = 0
-	agent_mm = MultiMeshInstance3D.new()
-	agent_mm.multimesh = mm
-	var mat := StandardMaterial3D.new()
-	mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
-	mat.vertex_color_use_as_albedo = true
-	agent_mm.material_override = mat
-	agent_mm.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
-	agent_mm.name = "Colonists"
-	add_child(agent_mm)
+	agent_root = Node3D.new()
+	agent_root.name = "Colonists"
+	add_child(agent_root)
+	var mat := ShaderMaterial.new()
+	mat.shader = load("res://shaders/prop.gdshader")
+	mat.set_shader_parameter("albedo_scale", 0.92)
+	mat.set_shader_parameter("haze_start", 70.0)
+	mat.set_shader_parameter("haze_end", 420.0)
+	for arch in RamaBody.ORDER:
+		var mm := MultiMesh.new()
+		mm.transform_format = MultiMesh.TRANSFORM_3D
+		mm.use_colors = true
+		mm.mesh = RamaBody.bake(RamaBody.make(arch))
+		mm.instance_count = 0
+		var mi := MultiMeshInstance3D.new()
+		mi.multimesh = mm
+		mi.material_override = mat
+		mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
+		mi.name = "Far_%s" % arch
+		agent_root.add_child(mi)
+		agent_far[arch] = mi
+	# Backwards-compatible handle for anything that still pokes at one node.
+	agent_mm = agent_far[RamaBody.ORDER[0]]
+
+	# The near pool. Six rigs is plenty: past sixty metres you cannot read a
+	# gait anyway, and the silhouette tier already carries the build.
+	for i in AGENT_RIGS:
+		var holder := Node3D.new()
+		holder.name = "Near%d" % i
+		holder.visible = false
+		agent_root.add_child(holder)
+		agent_rigs.append({
+			"node": holder, "rig": {}, "spec": {}, "gait": {},
+			"id": -1, "phase": 0.0, "th": 0.0, "z": 0.0,
+			"t_th": 0.0, "t_z": 0.0, "yaw": 0.0, "speed": 0.0, "warm": false,
+			"gr": 0.0, "gr_age": 99.0,
+		})
 	# Plot claim — soft radial stain + rim (not a solid green dome).
 	var pmm := MultiMesh.new()
 	pmm.transform_format = MultiMesh.TRANSFORM_3D
@@ -733,42 +1718,349 @@ func _build_agents() -> void:
 	plot_mm.name = "ColonistPlots"
 	add_child(plot_mm)
 
+## Which build a colonist has. Stable for the life of the save, because it is
+## derived from his id and nothing else — no table to persist, and the man you
+## met yesterday is the same shape today.
+func agent_archetype(id: int) -> String:
+	var h: int = (id * 2654435761) ^ 0x9E3779B9
+	h = (h ^ (h >> 15)) * 1274126177
+	return RamaBody.ORDER[posmod(h ^ (h >> 13), RamaBody.ORDER.size())]
+
 func refresh_agents() -> void:
-	if agent_mm == null or terrain == null:
+	if agent_root == null or terrain == null:
 		return
 	var buf: PackedFloat32Array = terrain.agents_lod()
 	var n: int = int(buf.size() / 9.0)
-	agent_mm.multimesh.instance_count = n
 	if plot_mm:
 		plot_mm.multimesh.instance_count = n
+	for a in agent_far.keys():
+		agent_far_xf[a] = []
+		agent_far_col[a] = []
+
+	# Nearest first — the pool goes to whoever you can actually see move.
+	var here := Vector2(player.theta if player else 0.0, player.z if player else 0.0)
+	var order: Array = []
 	for i in n:
+		var th: float = buf[i * 9]
+		var zz: float = buf[i * 9 + 1]
+		order.append([_arc_dist(here.x, here.y, th, zz), i])
+	order.sort_custom(func(a, b): return float(a[0]) < float(b[0]))
+
+	# Slots are STICKY. Assigning them nearest-first every refresh meant two men
+	# swapping rank rebuilt both rigs — twenty-odd meshes each, several times a
+	# second. Keep whoever is already seated and still in range; the rest of the
+	# pool goes to the nearest man who has no slot.
+	var seated := {}   # id -> slot
+	for j in agent_rigs.size():
+		if int(agent_rigs[j]["id"]) >= 0:
+			seated[int(agent_rigs[j]["id"])] = j
+	var taken := {}
+	var free_slots: Array = []
+	for e in order:
+		var d0: float = float(e[0])
+		var idx: int = int(e[1])
+		var aid: int = int(buf[idx * 9 + 5])
+		if seated.has(aid) and d0 < AGENT_RIG_RANGE * 1.3:
+			taken[seated[aid]] = aid
+	for j in agent_rigs.size():
+		if not taken.has(j):
+			free_slots.append(j)
+
+	for e in order:
+		var dist: float = float(e[0])
+		var i: int = int(e[1])
 		var th: float = buf[i * 9]
 		var zz: float = buf[i * 9 + 1]
 		var hunger: float = buf[i * 9 + 2]
 		var fatigue: float = buf[i * 9 + 3]
 		var mood: float = buf[i * 9 + 4]
-		var pth: float = buf[i * 9 + 6]
-		var pzz: float = buf[i * 9 + 7]
-		var prad: float = maxf(buf[i * 9 + 8], 8.0)
-		var gr: float = terrain.ground_radius(th, zz)
-		var xf := frame_at(th, zz, gr - 0.95)
-		agent_mm.multimesh.set_instance_transform(i, xf)
-		# Warm work-clothes tint; fatigue darkens, mood warms.
-		var col := Color(
-			0.55 + mood * 0.25,
-			0.38 + (1.0 - hunger) * 0.12,
-			0.28 + (1.0 - fatigue) * 0.08
-		)
-		agent_mm.multimesh.set_instance_color(i, col)
+		var id: int = int(buf[i * 9 + 5])
+		var arch: String = agent_archetype(id)
+		# Instance colour TINTS the baked mesh here — it does not replace it, so
+		# it stays near white. (RENDER_CONTRACT §2009.)
+		var tint := Color(
+			clampf(0.94 + mood * 0.10, 0.6, 1.08),
+			clampf(0.96 - hunger * 0.10, 0.6, 1.06),
+			clampf(0.96 - fatigue * 0.12, 0.6, 1.06))
+		var slot: int = -1
+		if seated.has(id) and taken.get(seated[id], -1) == id:
+			slot = seated[id]
+		elif dist < AGENT_RIG_RANGE and not free_slots.is_empty():
+			slot = free_slots.pop_front()
+			taken[slot] = id
+		if slot >= 0:
+			_seat_agent_rig(slot, id, arch, th, zz, tint)
+		else:
+			var gr: float = terrain.ground_radius(th, zz)
+			agent_far_xf[arch].append(frame_at(th, zz, gr))
+			agent_far_col[arch].append(tint)
 		if plot_mm:
+			var pth: float = buf[i * 9 + 6]
+			var pzz: float = buf[i * 9 + 7]
+			var prad: float = maxf(buf[i * 9 + 8], 8.0)
 			var pgr: float = terrain.ground_radius(pth, pzz)
 			var pxf := frame_at(pth, pzz, pgr - 0.03)
 			# Keep full claim radius in sim; visuals stay a soft ground stain.
 			pxf.basis = pxf.basis.scaled(Vector3(prad, 1.0, prad))
 			plot_mm.multimesh.set_instance_transform(i, pxf)
-			# A claim marker should be a tint on the ground, not a veil floating
-			# over it. 0.55 alpha read as milky plastic.
 			plot_mm.multimesh.set_instance_color(i, Color(0.30, 0.55, 0.28, 0.15))
+
+	for a in agent_far.keys():
+		var mi: MultiMeshInstance3D = agent_far[a]
+		var xfs: Array = agent_far_xf[a]
+		mi.multimesh.instance_count = xfs.size()
+		for j in xfs.size():
+			mi.multimesh.set_instance_transform(j, xfs[j])
+			mi.multimesh.set_instance_color(j, agent_far_col[a][j])
+	for j in agent_rigs.size():
+		if not taken.has(j):
+			agent_rigs[j]["node"].visible = false
+			agent_rigs[j]["id"] = -1
+
+## Give a pool slot to a colonist, rebuilding the rig only when the man changes.
+func _seat_agent_rig(slot: int, id: int, arch: String, th: float, zz: float, tint: Color) -> void:
+	var e: Dictionary = agent_rigs[slot]
+	if int(e["id"]) != id:
+		e["id"] = id
+		# One man, not one of eight statues — `vary` moves every axis a little
+		# off the archetype from his id alone.
+		var spec: Dictionary = RamaBody.vary(RamaBody.make(arch), id)
+		e["spec"] = spec
+		e["rig"] = RamaBody.build(e["node"], spec)
+		# The archetype's own walk, pulled toward what his actual body implies.
+		e["gait"] = RamaGait.blend(RamaGait.make(arch), RamaGait.for_body(spec), 0.35)
+		e["warm"] = false
+	e["t_th"] = th
+	e["t_z"] = zz
+	if not bool(e["warm"]):
+		e["th"] = th
+		e["z"] = zz
+		e["warm"] = true
+	e["node"].visible = true
+
+## Walk the near colonists toward wherever the sim last put them.
+##
+## The sim moves an agent a few times a second; a rig that snapped to that would
+## teleport and its feet would mean nothing. So each rig CHASES its target at
+## its own comfortable speed, and the gait is driven by the distance it actually
+## covered — which makes arrival, hesitation and idle fall out for free.
+func _tick_agent_rigs(dt: float) -> void:
+	if player == null or terrain == null:
+		return
+	var R: float = float(P["radius"])
+	for e in agent_rigs:
+		if not bool(e["node"].visible) or (e["rig"] as Dictionary).is_empty():
+			continue
+		var g: Dictionary = e["gait"]
+		var arc: float = wrapf(float(e["t_th"]) - float(e["th"]), -PI, PI) * R
+		var dz: float = float(e["t_z"]) - float(e["z"])
+		var gap: float = sqrt(arc * arc + dz * dz)
+		var top: float = float(g["walk_speed"]) * 1.35
+		var step: float = minf(gap, top * dt)
+		var moved: float = 0.0
+		if gap > 0.05:
+			moved = step
+			e["th"] = wrapf(float(e["th"]) + (arc / gap) * step / R, -PI, PI)
+			e["z"] = float(e["z"]) + (dz / gap) * step
+			var want: float = atan2(arc, dz)
+			e["yaw"] = lerp_angle(float(e["yaw"]), want, clampf(dt * 6.0, 0.0, 1.0))
+		var speed: float = moved / maxf(dt, 0.0001)
+		e["speed"] = lerpf(float(e["speed"]), speed, clampf(dt * 8.0, 0.0, 1.0))
+		var th: float = float(e["th"])
+		var zz: float = float(e["z"])
+		e["gr_age"] = float(e.get("gr_age", 99.0)) + dt
+		# Re-sample hull height ~8 Hz or after a real step — every-frame FFI
+		# for six near rigs was free hitch food on soft terrain.
+		if float(e["gr_age"]) > 0.12 or moved > 0.35 or float(e.get("gr", 0.0)) < 1.0:
+			e["gr"] = terrain.ground_radius(th, zz)
+			e["gr_age"] = 0.0
+		var gr: float = float(e["gr"])
+		var xf := frame_at(th, zz, gr)
+		xf.basis = xf.basis.rotated(xf.basis.y, float(e["yaw"]))
+		e["node"].transform = xf
+		e["phase"] = RamaGait.advance(float(e["phase"]), g,
+				float((e["spec"] as Dictionary)["stature"]), float(e["speed"]), dt)
+		e["phase"] = wrapf(float(e["phase"]), 0.0, TAU)
+		RamaGait.pose(e["rig"], g, float(e["phase"]), float(e["speed"]),
+				float(Time.get_ticks_msec()) * 0.001 + float(e["id"]) * 0.7)
+
+## Dwellings — how each principal lives. A delve is a doorway in a hillside; a
+## township is a cluster that grows. Works and followers are both READOUTS of
+## the sim, not decoration: a place with six figures around it is feeding six
+## people, and one with none has failed. LANDSCAPE_2200 depth-LOD rule.
+## Walls are vertical, and the drum lights from the axis — straight down. So a
+## wall gets almost no direct light and lands wherever `bounce_tint` puts it,
+## which is dark green. These are authored bright on purpose so the AMBIENT
+## term reads, not the lit term (§2012: display values, the shader scales them).
+const WORK_KIND_COL := [
+	Color(0.62, 0.58, 0.53),  # delve — cut stone, spoil-coloured
+	Color(0.80, 0.64, 0.46),  # terrace — timber and rammed earth
+	Color(0.90, 0.85, 0.73),  # township — plaster, the only pale thing out there
+]
+## Roofs take the light the walls cannot, so they are authored darker.
+const ROOF_TINT := 0.62
+## Metres works spread from the hearth, by kind. A delve barely spreads at all.
+const WORK_SPREAD := [9.0, 20.0, 34.0]
+const WORK_H := 2.4
+const ROOF_H := 1.5
+
+func _build_dwellings() -> void:
+	var wm := MultiMesh.new()
+	wm.transform_format = MultiMesh.TRANSFORM_3D
+	wm.use_colors = true
+	var hut := BoxMesh.new()
+	hut.size = Vector3(2.7, WORK_H, 2.7)
+	wm.mesh = hut
+	wm.instance_count = 0
+	work_mm = MultiMeshInstance3D.new()
+	work_mm.multimesh = wm
+	var wmat := ShaderMaterial.new()
+	wmat.shader = load("res://shaders/prop.gdshader")
+	work_mm.material_override = wmat
+	work_mm.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
+	work_mm.name = "Works"
+	add_child(work_mm)
+	dwelling_mats = [wmat]
+
+	# A box is a crate; a box with a pitched roof is a building. One extra
+	# draw call buys the entire silhouette.
+	var rm := MultiMesh.new()
+	rm.transform_format = MultiMesh.TRANSFORM_3D
+	rm.use_colors = true
+	var roof := CylinderMesh.new()
+	roof.top_radius = 0.0
+	roof.bottom_radius = 2.15
+	roof.height = ROOF_H
+	roof.radial_segments = 4
+	roof.rings = 1
+	roof.cap_bottom = false
+	rm.mesh = roof
+	rm.instance_count = 0
+	roof_mm = MultiMeshInstance3D.new()
+	roof_mm.multimesh = rm
+	var rmat := ShaderMaterial.new()
+	rmat.shader = load("res://shaders/prop.gdshader")
+	roof_mm.material_override = rmat
+	roof_mm.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
+	roof_mm.name = "Roofs"
+	add_child(roof_mm)
+	dwelling_mats.append(rmat)
+
+	var fm := MultiMesh.new()
+	fm.transform_format = MultiMesh.TRANSFORM_3D
+	fm.use_colors = true
+	var body := CapsuleMesh.new()
+	body.radius = 0.25
+	body.height = 1.30
+	body.radial_segments = 6
+	body.rings = 2
+	fm.mesh = body
+	fm.instance_count = 0
+	follower_mm = MultiMeshInstance3D.new()
+	follower_mm.multimesh = fm
+	var fmat := ShaderMaterial.new()
+	fmat.shader = load("res://shaders/prop.gdshader")
+	follower_mm.material_override = fmat
+	follower_mm.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	follower_mm.name = "Followers"
+	add_child(follower_mm)
+
+## Deterministic 0..1 from two ints — same layout every load, no stored state.
+func _dhash(a: int, b: int) -> float:
+	var h: int = (a * 73856093) ^ (b * 19349663)
+	h = (h ^ (h >> 13)) * 1274126177
+	return float((h ^ (h >> 16)) & 0xFFFFFF) / 16777215.0
+
+func refresh_dwellings() -> void:
+	if work_mm == null or terrain == null:
+		return
+	var buf: PackedFloat32Array = terrain.dwellings_lod()
+	var n: int = int(buf.size() / 9.0)
+	var hab_r: float = P["radius"]
+
+	var wx: Array[Transform3D] = []
+	var wc: Array[Color] = []
+	var rx: Array[Transform3D] = []
+	var rc: Array[Color] = []
+	var fx: Array[Transform3D] = []
+	var fc: Array[Color] = []
+
+	for i in n:
+		var th: float = buf[i * 9]
+		var zz: float = buf[i * 9 + 1]
+		var kind: int = clampi(int(buf[i * 9 + 2]), 0, 2)
+		var followers: float = buf[i * 9 + 3]
+		var works: int = int(buf[i * 9 + 4])
+		var quality: float = buf[i * 9 + 7]
+		var spread: float = WORK_SPREAD[kind]
+		var base: Color = WORK_KIND_COL[kind]
+
+		for w in works:
+			# Golden-angle scatter so a growing township spirals outward
+			# instead of stacking rings.
+			var a: float = float(w) * 2.39996 + _dhash(i, 0) * TAU
+			var rad: float = spread * sqrt((float(w) + 0.6) / maxf(float(works), 1.0))
+			var ox: float = cos(a) * rad
+			var oz: float = sin(a) * rad
+			var wth: float = th + ox / hab_r
+			var wzz: float = zz + oz
+			# Up on a drum is DECREASING radius, so a thing sits on the ground
+			# at (ground - half its height), never ground + anything.
+			var gr: float = terrain.ground_radius(wth, wzz)
+			var hs: float = 0.55 + _dhash(i, w + 31) * 0.35
+			# A delve's works are cut into the hill: squat, and sunk enough to
+			# read as a doorway rather than a shed someone left on a mountain.
+			var sy: float = 0.55 if kind == 0 else 0.8 + hs * 0.6
+			var sxz: float = 1.15 if kind == 0 else 1.0
+			var seat: float = WORK_H * 0.5 * sy
+			if kind == 0:
+				seat *= 0.45
+			var xf: Transform3D = frame_at(wth, wzz, gr - seat)
+			xf.basis = xf.basis.rotated(xf.basis.y.normalized(), _dhash(i, w + 7) * TAU)
+			# scaled() scales in GLOBAL axes; on a cylinder that squashes the
+			# box along a world axis instead of its own up. scaled_local() is
+			# the one that means "taller".
+			xf.basis = xf.basis.scaled_local(Vector3(sxz, sy, sxz))
+			wx.append(xf)
+			# Poor ground shows on the buildings before it shows in a readout.
+			var wear: float = 0.82 + clampf(quality, 0.0, 1.4) * 0.16
+			var wcol := Color(base.r * wear, base.g * wear, base.b * wear)
+			wc.append(wcol)
+			# Roof rides on the wall top, turned 45 deg so its ridge crosses
+			# the walls instead of lining up with them.
+			var rxf: Transform3D = frame_at(wth, wzz, gr - seat * 2.0 - ROOF_H * 0.5)
+			rxf.basis = xf.basis.rotated(xf.basis.y.normalized(), PI * 0.25)
+			rxf.basis = rxf.basis.scaled_local(Vector3(sxz, 1.0, sxz))
+			rx.append(rxf)
+			rc.append(Color(wcol.r * ROOF_TINT, wcol.g * ROOF_TINT, wcol.b * ROOF_TINT))
+
+		var fn_i: int = int(round(followers))
+		for f in fn_i:
+			var fa: float = _dhash(i, f + 101) * TAU
+			var frad: float = 3.0 + _dhash(i, f + 211) * spread * 0.8
+			var fth: float = th + cos(fa) * frad / hab_r
+			var fzz: float = zz + sin(fa) * frad
+			var fgr: float = terrain.ground_radius(fth, fzz)
+			var fxf: Transform3D = frame_at(fth, fzz, fgr - 0.72)
+			fxf.basis = fxf.basis.rotated(fxf.basis.y.normalized(), _dhash(i, f + 307) * TAU)
+			fx.append(fxf)
+			# Cooler and plainer than a principal, but still lit like a person.
+			# Too dark and a row of them reads as fence posts.
+			var v: float = 0.78 + _dhash(i, f + 401) * 0.14
+			fc.append(Color(v, v * 0.88, v * 0.78))
+
+	work_mm.multimesh.instance_count = wx.size()
+	for i in wx.size():
+		work_mm.multimesh.set_instance_transform(i, wx[i])
+		work_mm.multimesh.set_instance_color(i, wc[i])
+	roof_mm.multimesh.instance_count = rx.size()
+	for i in rx.size():
+		roof_mm.multimesh.set_instance_transform(i, rx[i])
+		roof_mm.multimesh.set_instance_color(i, rc[i])
+	follower_mm.multimesh.instance_count = fx.size()
+	for i in fx.size():
+		follower_mm.multimesh.set_instance_transform(i, fx[i])
+		follower_mm.multimesh.set_instance_color(i, fc[i])
 
 func _build_carcasses() -> void:
 	var mm := MultiMesh.new()
@@ -780,9 +2072,8 @@ func _build_carcasses() -> void:
 	mm.instance_count = 0
 	carcass_mm = MultiMeshInstance3D.new()
 	carcass_mm.multimesh = mm
-	var mat := StandardMaterial3D.new()
-	mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
-	mat.vertex_color_use_as_albedo = true
+	var mat := ShaderMaterial.new()
+	mat.shader = load("res://shaders/prop.gdshader")
 	carcass_mm.material_override = mat
 	carcass_mm.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 	carcass_mm.name = "Carcasses"
@@ -821,9 +2112,11 @@ func _build_stations() -> void:
 	mm.instance_count = 0
 	station_mm = MultiMeshInstance3D.new()
 	station_mm.multimesh = mm
-	var mat := StandardMaterial3D.new()
-	mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
-	mat.vertex_color_use_as_albedo = true
+	# An unshaded StandardMaterial3D with a default-WHITE albedo_color renders
+	# instanced props as flat bright blocks with no shading at all. This was
+	# the mystery white cube. Use the shared prop shader instead.
+	var mat := ShaderMaterial.new()
+	mat.shader = load("res://shaders/prop.gdshader")
 	station_mm.material_override = mat
 	station_mm.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 	station_mm.name = "CraftStations"
@@ -1132,46 +2425,183 @@ func _refresh_biome_map() -> void:
 		map_label.text = "KEPLER DRUM · live drainage"
 
 func _build_axis_light() -> void:
-	# The sun is a strip running down the axis. Day length is a lighting
-	# schedule someone set, not an orbit. Keep emission modest — the strip
-	# should read as a warm line, not a nuclear bloom that whites out the sky.
+	# Photothermal Spine: dim always-on core + traveling day-carriage + endcap
+	# light rings. Day length is a schedule, not an orbit.
 	var half_l: float = float(P["length"]) * 0.49
-	var st := SurfaceTool.new()
-	st.begin(Mesh.PRIMITIVE_TRIANGLES)
-	var seg := 16
-	var rad := 5.5
-	for i in seg:
-		var a0 := TAU * float(i) / seg
-		var a1 := TAU * float(i + 1) / seg
-		var x0 := rad * cos(a0)
-		var y0 := rad * sin(a0)
-		var x1 := rad * cos(a1)
-		var y1 := rad * sin(a1)
-		# Warm/cool gradient along length: centre warm, ends cooler (Coriolis
-		# weather means the ends are cloudier). Vertex colour gradient.
-		var warm := Color(1.0, 0.96, 0.88)
-		var cool := Color(0.88, 0.92, 0.98)
-		for v_pair in [[Vector3(x0, y0, -half_l), cool], [Vector3(x0, y0, half_l), cool],
-						[Vector3(x1, y1, half_l), cool], [Vector3(x0, y0, -half_l), cool],
-						[Vector3(x1, y1, half_l), cool], [Vector3(x1, y1, -half_l), cool]]:
-			var vp: Vector3 = v_pair[0]
-			# Centre is warm, ends are cool.
-			var zt: float = 1.0 - clampf(absf(vp.z) / half_l, 0.0, 1.0)
-			st.set_color(warm.lerp(cool, 1.0 - zt * zt))
-			st.set_normal(Vector3(vp.x, vp.y, 0).normalized())
-			st.add_vertex(vp)
-	var mi := MeshInstance3D.new()
-	mi.mesh = st.commit()
+	var L: float = half_l * 2.0
+
+	# --- SpineCore (night safety fill) ---
+	var spine := MeshInstance3D.new()
+	spine.mesh = _make_axis_tube(half_l, 4.2, 12,
+			Color(0.72, 0.78, 0.88), Color(0.55, 0.62, 0.75))
+	spine_mat = _make_emissive_mat(Color(0.75, 0.82, 0.92), 0.55)
+	spine.material_override = spine_mat
+	spine.name = "SpineCore"
+	spine.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	add_child(spine)
+	axis_mat = spine_mat  # compat: daylight still tweaks "axis"
+
+	# --- DayCarriage (bright traveling segment) ---
+	var car_half: float = L * CARRIAGE_FRAC * 0.5
+	day_carriage = MeshInstance3D.new()
+	day_carriage.mesh = _make_axis_tube(car_half, 7.2, 16,
+			Color(1.0, 0.96, 0.88), Color(1.0, 0.90, 0.72))
+	carriage_mat = _make_emissive_mat(Color(1.0, 0.94, 0.82), 3.2)
+	day_carriage.material_override = carriage_mat
+	day_carriage.name = "DayCarriage"
+	day_carriage.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	add_child(day_carriage)
+	carriage_z = -half_l
+	day_carriage.position = Vector3(0, 0, carriage_z)
+
+	# --- Endcap light rings (horizon suns / safety) ---
+	var ring_z: float = half_l * 0.985
+	endcap_ring_a = _make_endcap_ring("EndcapRingNeg", -ring_z)
+	endcap_ring_b = _make_endcap_ring("EndcapRingPos", ring_z)
+	ring_mat_a = endcap_ring_a.material_override as StandardMaterial3D
+	ring_mat_b = endcap_ring_b.material_override as StandardMaterial3D
+	add_child(endcap_ring_a)
+	add_child(endcap_ring_b)
+
+func _make_emissive_mat(col: Color, energy: float) -> StandardMaterial3D:
 	var mat := StandardMaterial3D.new()
 	mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
 	mat.vertex_color_use_as_albedo = true
 	mat.emission_enabled = true
-	mat.emission = Color(1.0, 0.92, 0.78)
-	mat.emission_energy_multiplier = 1.6
-	mi.material_override = mat
-	axis_mat = mat
-	mi.name = "AxisLight"
-	add_child(mi)
+	mat.emission = col
+	mat.emission_energy_multiplier = energy
+	mat.albedo_color = col
+	return mat
+
+func _make_axis_tube(half_z: float, rad: float, seg: int, warm: Color, cool: Color) -> ArrayMesh:
+	var st := SurfaceTool.new()
+	st.begin(Mesh.PRIMITIVE_TRIANGLES)
+	for i in seg:
+		var a0 := TAU * float(i) / float(seg)
+		var a1 := TAU * float(i + 1) / float(seg)
+		var x0 := rad * cos(a0)
+		var y0 := rad * sin(a0)
+		var x1 := rad * cos(a1)
+		var y1 := rad * sin(a1)
+		for v_pair in [
+			[Vector3(x0, y0, -half_z), cool], [Vector3(x0, y0, half_z), warm],
+			[Vector3(x1, y1, half_z), warm], [Vector3(x0, y0, -half_z), cool],
+			[Vector3(x1, y1, half_z), warm], [Vector3(x1, y1, -half_z), cool]]:
+			var vp: Vector3 = v_pair[0]
+			var zt: float = 1.0 - clampf(absf(vp.z) / maxf(half_z, 0.01), 0.0, 1.0)
+			st.set_color(warm.lerp(cool, 1.0 - zt * zt))
+			st.set_normal(Vector3(vp.x, vp.y, 0).normalized())
+			st.add_vertex(vp)
+	return st.commit()
+
+func _make_endcap_ring(node_name: String, z: float) -> MeshInstance3D:
+	# Thin torus-like ring around the axis at the endcap — "horizon sun".
+	var st := SurfaceTool.new()
+	st.begin(Mesh.PRIMITIVE_TRIANGLES)
+	var seg := 48
+	var r0 := 28.0
+	var r1 := 42.0
+	var thick := 3.5
+	for i in seg:
+		var a0 := TAU * float(i) / float(seg)
+		var a1 := TAU * float(i + 1) / float(seg)
+		# Outer quad strip (face toward mid-habitat).
+		var c0 := Vector3(r0 * cos(a0), r0 * sin(a0), 0)
+		var c1 := Vector3(r0 * cos(a1), r0 * sin(a1), 0)
+		var d0 := Vector3(r1 * cos(a0), r1 * sin(a0), 0)
+		var d1 := Vector3(r1 * cos(a1), r1 * sin(a1), 0)
+		var nsgn: float = -1.0 if z > 0.0 else 1.0
+		var front := Vector3(0, 0, nsgn * thick * 0.5)
+		var back := Vector3(0, 0, -nsgn * thick * 0.5)
+		var col := Color(1.0, 0.92, 0.78)
+		for tri in [
+			[c0 + front, d0 + front, d1 + front], [c0 + front, d1 + front, c1 + front],
+			[c0 + back, d1 + back, d0 + back], [c0 + back, c1 + back, d1 + back]]:
+			for j in 3:
+				var vp: Vector3 = tri[j]
+				st.set_color(col)
+				st.set_normal(Vector3(0, 0, nsgn))
+				st.add_vertex(vp)
+	var mi := MeshInstance3D.new()
+	mi.mesh = st.commit()
+	mi.material_override = _make_emissive_mat(Color(1.0, 0.90, 0.75), 1.1)
+	mi.name = node_name
+	mi.position = Vector3(0, 0, z)
+	mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	return mi
+
+## Day-carriage progress 0..1 along +z with noon linger (dawn wave §BE).
+func _carriage_progress(phase: float) -> float:
+	if phase < 0.02:
+		return 0.0
+	if phase >= 0.90:
+		return 1.0
+	var p: float = (phase - 0.02) / 0.88
+	if p < 0.32:
+		return smoothstep(0.0, 0.32, p) * 0.40
+	if p < 0.58:
+		return 0.40 + (p - 0.32) / 0.26 * 0.20  # linger mid-habitat
+	return 0.60 + smoothstep(0.58, 1.0, p) * 0.40
+
+func _sync_photothermal_spine(phase: float, band: String) -> void:
+	var half_l: float = float(P.get("length", 6000.0)) * 0.49
+	var prog: float = _carriage_progress(phase)
+	carriage_z = lerpf(-half_l, half_l, prog)
+	if day_carriage:
+		day_carriage.position = Vector3(0, 0, carriage_z)
+	# Faster pulse when day is sped up so the carriage still “breathes”.
+	var pulse: float = 1.0 + sin(clock * TAU / maxf(120.0 / maxf(day_speed, 1.0), 8.0)) * 0.05
+	var warm := Color(1.0, 0.94, 0.80).lerp(Color(1.0, 0.55, 0.32), 1.0 - day)
+	# Sunset hour: copper → rose as carriage exits +z end.
+	var sunset: float = 0.0
+	if band == "dusk":
+		sunset = smoothstep(0.68, 0.86, phase)
+		warm = warm.lerp(Color(1.0, 0.58, 0.28), 0.35 + 0.45 * sunset)
+		warm = warm.lerp(Color(1.0, 0.42, 0.55), sunset * 0.28)
+	elif band == "dawn":
+		warm = warm.lerp(Color(1.0, 0.78, 0.55), 0.4)
+	# Spine: always-on dim fill.
+	if spine_mat:
+		spine_mat.emission = Color(0.70, 0.78, 0.90).lerp(warm, day * 0.35 + sunset * 0.25)
+		spine_mat.emission_energy_multiplier = (0.35 + 0.45 * day + sunset * 0.55) * pulse
+		spine_mat.albedo_color = spine_mat.emission
+	# Carriage: bright when in daylight schedule; flare as it leaves (sunset).
+	var car_on: float = day
+	if phase > 0.88 or phase < 0.02:
+		car_on *= 0.15
+	if carriage_mat:
+		carriage_mat.emission = warm
+		var car_e: float = 1.2 + 2.8 * car_on + sunset * 2.2
+		carriage_mat.emission_energy_multiplier = car_e * pulse
+		carriage_mat.albedo_color = warm
+		if day_carriage:
+			day_carriage.visible = car_on > 0.05 or day > 0.08 or sunset > 0.05
+	# Rings brighten when carriage nears that end (dawn/dusk contact).
+	var near_neg: float = 1.0 - clampf(absf(carriage_z - (-half_l)) / 700.0, 0.0, 1.0)
+	var near_pos: float = 1.0 - clampf(absf(carriage_z - half_l) / 700.0, 0.0, 1.0)
+	if ring_mat_a:
+		ring_mat_a.emission = warm.lerp(Color(0.85, 0.88, 1.0), 0.25)
+		ring_mat_a.emission_energy_multiplier = (0.55 + 1.8 * near_neg * day + 0.35 * (1.0 - day)
+				+ near_neg * sunset * 1.4) * pulse
+	if ring_mat_b:
+		# +z ring catches the departing carriage — golden-hour flare.
+		ring_mat_b.emission = warm.lerp(Color(1.0, 0.72, 0.42), 0.15 + sunset * 0.55)
+		ring_mat_b.emission_energy_multiplier = (0.55 + 1.8 * near_pos * day + 0.35 * (1.0 - day)
+				+ near_pos * (1.2 + sunset * 3.5)) * pulse
+	# Thermohydronic cue: steam when carriage passes the player.
+	if player != null and day > 0.15:
+		if absf(player.z - carriage_z) < 120.0 and absf(carriage_z - last_carriage_steam_z) > 80.0:
+			steam_life = maxf(steam_life, 2.8)
+			last_carriage_steam_z = carriage_z
+	# Push schedule into sim so plants share the spectacle clock — throttled;
+	# every-frame FFI was free hitch food and plants don't need sub-degree phase.
+	if terrain != null and terrain.has_method("set_day_schedule"):
+		if absf(phase - _sched_phase) > 0.003 or absf(day - _sched_day) > 0.012 \
+				or absf(carriage_z - _sched_cz) > 12.0:
+			_sched_phase = phase
+			_sched_day = day
+			_sched_cz = carriage_z
+			terrain.set_day_schedule(phase, day, carriage_z)
 
 func _build_clouds() -> void:
 	# A band at one radius: in a drum, "altitude" is a radius and the
@@ -1201,24 +2631,34 @@ func _build_clouds() -> void:
 	add_child(mi)
 
 func _build_dust() -> void:
-	# Motes near the player. Cheap, and they do more for the sense of air
-	# than anything else this scene can afford. More motes at smaller scale
-	# sells depth-of-field better.
+	# Motes + pollen near the player. Cheap air life — depth-of-field fodder
+	# and the single biggest "there is atmosphere here" cue at walking range.
 	var mm := MultiMesh.new()
 	mm.transform_format = MultiMesh.TRANSFORM_3D
 	mm.use_colors = true
 	var qm := QuadMesh.new()
-	qm.size = Vector2(0.06, 0.06)
+	qm.size = Vector2(0.055, 0.055)
 	mm.mesh = qm
-	mm.instance_count = 480
+	mm.instance_count = 720
 	var rng := RandomNumberGenerator.new()
 	rng.seed = 7
 	for i in mm.instance_count:
 		var t := Transform3D()
-		t.origin = Vector3(rng.randf_range(-26, 26), rng.randf_range(-8, 18),
-				rng.randf_range(-26, 26))
+		t.origin = Vector3(rng.randf_range(-30, 30), rng.randf_range(-6, 20),
+				rng.randf_range(-30, 30))
+		var s: float = rng.randf_range(0.55, 1.45)
+		t.basis = t.basis.scaled(Vector3(s, s, s))
 		mm.set_instance_transform(i, t)
-		mm.set_instance_color(i, Color(1, 0.96, 0.88, rng.randf_range(0.08, 0.30)))
+		# Mix warm dust with green-gold pollen so the air isn't one tint.
+		var pollen: float = rng.randf()
+		var col: Color
+		if pollen > 0.62:
+			col = Color(0.72, 0.88, 0.42, rng.randf_range(0.10, 0.28))
+		elif pollen > 0.35:
+			col = Color(1.0, 0.94, 0.78, rng.randf_range(0.08, 0.26))
+		else:
+			col = Color(0.92, 0.96, 1.0, rng.randf_range(0.06, 0.18))
+		mm.set_instance_color(i, col)
 	dust = MultiMeshInstance3D.new()
 	dust.multimesh = mm
 	var mat := StandardMaterial3D.new()
@@ -1230,6 +2670,29 @@ func _build_dust() -> void:
 	dust.material_override = mat
 	dust.name = "Dust"
 	add_child(dust)
+
+func _build_insects() -> void:
+	# Tiny warm flecks that orbit the walk space — birds/insects at miniature
+	# scale. Start empty so identity transforms don't park black squares at the
+	# axis (or on the first slope the camera sees).
+	var mm := MultiMesh.new()
+	mm.transform_format = MultiMesh.TRANSFORM_3D
+	mm.use_colors = true
+	var qm := QuadMesh.new()
+	qm.size = Vector2(0.035, 0.035)
+	mm.mesh = qm
+	mm.instance_count = 0
+	insects = MultiMeshInstance3D.new()
+	insects.multimesh = mm
+	var mat := StandardMaterial3D.new()
+	mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	mat.vertex_color_use_as_albedo = true
+	mat.billboard_mode = BaseMaterial3D.BILLBOARD_ENABLED
+	insects.material_override = mat
+	insects.name = "Insects"
+	insects.visible = false
+	add_child(insects)
 
 func _box(size: Vector3, col: Color, emissive := false) -> MeshInstance3D:
 	var mi := MeshInstance3D.new()
@@ -1257,7 +2720,12 @@ func _box(size: Vector3, col: Color, emissive := false) -> MeshInstance3D:
 	return mi
 
 func ground_at(theta: float, z: float) -> float:
-	var start: float = terrain.ground_radius(theta, z) - 40.0
+	# Start below local relief so tall cliff faces still ray-hit (Wave 9 / 4001).
+	var gr: float = terrain.ground_radius(theta, z)
+	var pad: float = 40.0
+	if P.has("max_elevation"):
+		pad = maxf(40.0, float(P["max_elevation"]) * 0.15)
+	var start: float = gr - pad
 	return terrain.ground_below(theta, z, start)
 
 func _build_homestead() -> void:
@@ -1357,29 +2825,74 @@ func _queue_chunks() -> void:
 		var tang := Vector3(-sin(th), cos(th), 0.0)
 		face_t = f.dot(tang)
 		face_z = f.z
+	# Scored insert, not append-then-sort. This runs three times a second and
+	# `pending` used to be re-sorted whole through a GDScript lambda each time —
+	# and the dedupe compared a String against the [ti, zi, score] entries, so
+	# it never matched and the queue grew a fresh copy of the ring every pass.
+	var added := false
 	for dt in range(-CHUNK_RADIUS, CHUNK_RADIUS + 1):
 		for dz in range(-CHUNK_RADIUS, CHUNK_RADIUS + 1):
 			var k := _chunk_key(ti0 + dt, zi0 + dz)
-			if loaded.has(k) or pending.has(k):
+			if loaded.has(k) or pending_set.has(k):
 				continue
-			var dist: int = absi(dt) + absi(dz)
 			# Lower score = sooner. Facing the look direction gets a bonus.
-			var aim: float = -(float(dt) * face_t + float(dz) * face_z) * 0.55
-			pending.append([posmod(ti0 + dt, n_around), zi0 + dz, dist, aim])
-	pending.sort_custom(func(a, b):
-		return (float(a[2]) + float(a[3])) < (float(b[2]) + float(b[3]))
-	)
+			var score: float = float(absi(dt) + absi(dz)) \
+					- (float(dt) * face_t + float(dz) * face_z) * 0.55
+			pending.append([posmod(ti0 + dt, n_around), zi0 + dz, score])
+			pending_set[k] = true
+			added = true
+	if added:
+		pending.sort_custom(_by_score)
 	_unload_far(ti0, zi0)
 
-func _pump_chunks(budget: int) -> void:
+static func _by_score(a: Array, b: Array) -> bool:
+	return float(a[2]) < float(b[2])
+
+## Milliseconds of a frame that chunk work may spend. Meshing and painting a
+## chunk costs ~2-3 ms of the 16.7 ms a 60 Hz frame has; everything else in
+## `_process` is microseconds. So this one number is the frame budget.
+const CHUNK_MS_BUDGET := 6.0
+
+## The only millisecond-scale work on a frame, under one shared budget.
+##
+## Remesh first: the bite you just took has to appear under the brush or the
+## tool feels detached from the ground. Streaming second, but never starved —
+## letting remesh eat the whole budget during a dig used to open holes in the
+## ring behind you.
+func _tick_streaming() -> void:
+	# Look-friction work dropped the old per-20-frame queue from player.gd and
+	# nothing replaced it — walk off the boot ring and mid dither punches a
+	# void under your feet (near chunks gone, mid discarded inside ~105 m).
+	var just_queued := false
+	if player != null and P.has("radius"):
+		var here := Vector2(player.theta * float(P["radius"]), player.z)
+		if here.distance_to(stream_anchor) > CHUNK_SPAN * 0.45:
+			stream_anchor = here
+			_queue_chunks()
+			just_queued = true
+	var t0 := Time.get_ticks_usec()
+	_drain_remesh(2 if dig_held else 1, t0)
+	# After a ring rebuild, spend a little more budget so the hole closes
+	# in one or two frames instead of a long dither trail.
+	_pump_chunks(5 if just_queued else 2, t0)
+
+func _over_budget(t0: int) -> bool:
+	return float(Time.get_ticks_usec() - t0) * 0.001 > CHUNK_MS_BUDGET
+
+## `t0` opts into the frame budget. The bulk fills at load and for screenshots
+## pass nothing and run to completion.
+func _pump_chunks(budget: int, t0: int = -1) -> void:
 	var n := 0
 	while pending.size() > 0 and n < budget:
 		var e = pending.pop_front()
 		var k := _chunk_key(e[0], e[1])
+		pending_set.erase(k)
 		if loaded.has(k):
 			continue
 		_build_chunk(e[0], e[1])
 		n += 1
+		if t0 >= 0 and _over_budget(t0):
+			break
 
 func _build_chunk(ti: int, zi: int) -> void:
 	var k := _chunk_key(ti, zi)
@@ -1396,8 +2909,19 @@ func _build_chunk(ti: int, zi: int) -> void:
 		mi.name = "Chunk" + k
 		chunk_root.add_child(mi)
 		loaded[k] = mi
+		chunk_fail.erase(k)
 	else:
-		loaded[k] = null
+		# Soft-fail empty meshes. Permanently caching null left rectangular holes
+		# for the whole session when the radial band briefly missed relief.
+		var fails := int(chunk_fail.get(k, 0)) + 1
+		chunk_fail[k] = fails
+		# Retry more for tall massifs — empty mesh often means radial band
+		# undersampled once; permanent null punches a visible rectangle.
+		if fails >= 6:
+			loaded[k] = null
+		else:
+			pending.push_front([ti, zi, -20.0])
+			pending_set[k] = true
 	if old != null and is_instance_valid(old):
 		old.queue_free()
 
@@ -1511,36 +3035,190 @@ func place_module(p: Vector3, kind: int, from_save: bool = false) -> void:
 	modules.append(node)
 
 func _build_plants() -> void:
-	# Morphology tiers: near = stem+canopy, mid = tapered prism, far = billboard card.
-	plant_mm = _make_plant_layer("PlantsNear", _make_tree_mesh(1.0), 95.0, 190.0)
-	plant_mm_mid = _make_plant_layer("PlantsMid", _make_tree_mesh(0.72), 170.0, 300.0)
+	# Six archetypes × three LOD tiers. Genome picks silhouette; biome biases
+	# colour (Wave 5).
+	plant_species_near = []
+	plant_species_mid = []
+	for kind in 6:
+		var near := _make_plant_layer("PlantsNear_%d" % kind, _make_species_mesh(kind, 1.0), 95.0, 190.0)
+		# Only the near tier casts — mid/far shadow cascades crushed the ground.
+		near.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
+		plant_species_near.append(near)
+		var mid := _make_plant_layer("PlantsMid_%d" % kind, _make_species_mesh(kind, 0.72), 170.0, 300.0)
+		mid.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+		# LOD shade match — same fill energy as near (Wave 5).
+		if mid.material_override is ShaderMaterial:
+			mid.material_override.set_shader_parameter("sway", 0.06)
+		plant_species_mid.append(mid)
+	# Far LOD stays one billboard layer (silhouette only at range).
 	plant_mm_far = _make_plant_layer("PlantsFar", _make_billboard_mesh(), 280.0, 450.0)
+	plant_mm_far.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	if plant_mm_far.material_override is ShaderMaterial:
+		plant_mm_far.material_override.set_shader_parameter("sway", 0.0)
+	# Keep legacy aliases pointing at conifer near/mid for any old callers.
+	plant_mm = plant_species_near[0]
+	plant_mm_mid = plant_species_mid[0]
 	_refresh_plants()
 
-func _make_tree_mesh(detail: float) -> ArrayMesh:
+## Species from plants_lod kind field (0 conifer, 1 broadleaf, 2 willow, 3 scrub, 4 reed, 5 orchard).
+func _biome_species(bid: int, genome: int = -1) -> int:
+	if genome >= 0:
+		return clampi(genome % 6, 0, 5)
+	match bid:
+		5: return 0          # forest → conifer fallback
+		1, 2, 9: return 2    # wetland / riparian / swamp → willow
+		4, 6, 7, 11, 12: return 3  # scrub / alpine / rock / desert / dune → scrub
+		13: return 4         # shore → reed sparse
+		10: return 1         # meadow → broadleaf
+		_: return 1          # grassland / farm / water edge → broadleaf
+
+## Source-mesh colour convention for anything drawn with `tree.gdshader`.
+##
+## A MultiMesh instance colour MULTIPLIES the source mesh's vertex colour, and
+## the shader then raises the product to 1.95. A mesh that bakes its own leaf
+## green therefore lands at a hundredth of the value it was authored at — and a
+## brown trunk multiplied by a green leaf lands at zero. That was the crop of
+## black sticks standing in every meadow.
+##
+## So RGB carries a luminance RATIO around 1.0 and the instance colour carries
+## the hue; ALPHA is a material key the shader reads: 0 wood, 0.5 fruit, 1 leaf.
+## Wood and fruit are the two hues a per-instance leaf colour can never make, so
+## they are named in the shader instead of baked in here.
+static func _leaf(shade: float) -> Color:
+	return Color(shade, shade, shade, 1.0)
+
+static func _wood(shade: float) -> Color:
+	return Color(shade, shade, shade, 0.0)
+
+static func _fruit(shade: float) -> Color:
+	return Color(shade, shade, shade, 0.5)
+
+func _make_species_mesh(kind: int, detail: float) -> ArrayMesh:
+	match kind:
+		0: return _make_conifer_mesh(detail)
+		2: return _make_willow_mesh(detail)
+		3: return _make_scrub_mesh(detail)
+		4: return _make_reed_mesh(detail)
+		5: return _make_orchard_mesh(detail)
+		_: return _make_broadleaf_mesh(detail)
+
+func _make_conifer_mesh(detail: float) -> ArrayMesh:
 	var st := SurfaceTool.new()
 	st.begin(Mesh.PRIMITIVE_TRIANGLES)
-	# Trunk
-	var trunk_h := 1.0
-	var trunk_r := 0.12
-	_add_prism(st, Vector3(0, trunk_h * 0.5, 0), Vector3(trunk_r, trunk_h, trunk_r),
-			Color(0.28, 0.18, 0.10))
-	# Crossed canopy cards
-	var canopy := Color(0.14, 0.36, 0.16)
-	var ch := 0.85 * detail
-	var cw := 0.95 * detail
-	_add_quad(st, Vector3(0, trunk_h + ch * 0.35, 0), Vector3(cw, ch, 0.04), canopy)
-	_add_quad(st, Vector3(0, trunk_h + ch * 0.35, 0), Vector3(0.04, ch, cw), canopy)
-	if detail > 0.85:
-		_add_prism(st, Vector3(0, trunk_h + ch * 0.55, 0), Vector3(cw * 0.45, ch * 0.5, cw * 0.45),
-				Color(0.12, 0.32, 0.14))
+	var trunk_h := 1.15
+	_add_prism(st, Vector3(0, trunk_h * 0.40, 0), Vector3(0.12, trunk_h * 0.80, 0.12),
+			_wood(1.0))
+	var layers: int = 4 if detail > 0.85 else 3
+	for li in layers:
+		var t: float = float(li) / float(max(layers - 1, 1))
+		var y: float = trunk_h * 0.55 + t * 1.15 * detail
+		var rad: float = (0.85 - t * 0.62) * detail
+		var h: float = (0.48 - t * 0.06) * detail
+		_add_prism(st, Vector3(0, y, 0), Vector3(rad, h, rad), _leaf(0.84 + t * 0.30))
+	_add_prism(st, Vector3(0, trunk_h * 0.55 + 1.25 * detail, 0),
+			Vector3(0.14 * detail, 0.22 * detail, 0.14 * detail),
+			_leaf(1.18))
 	st.generate_normals()
 	return st.commit()
+
+func _make_broadleaf_mesh(detail: float) -> ArrayMesh:
+	var st := SurfaceTool.new()
+	st.begin(Mesh.PRIMITIVE_TRIANGLES)
+	var trunk_h := 1.0
+	_add_prism(st, Vector3(0, trunk_h * 0.38, 0), Vector3(0.14, trunk_h * 0.76, 0.14),
+			_wood(1.0))
+	_add_prism(st, Vector3(0, trunk_h * 0.82, 0), Vector3(0.09, trunk_h * 0.28, 0.09),
+			_wood(0.86))
+	var layers: int = 3 if detail > 0.85 else 2
+	var base_y := trunk_h * 0.72
+	for li in layers:
+		var t: float = float(li) / float(max(layers - 1, 1))
+		var y: float = base_y + t * 0.95 * detail
+		var rad: float = (0.72 - t * 0.38) * detail
+		var h: float = (0.42 - t * 0.08) * detail
+		_add_prism(st, Vector3(0, y, 0), Vector3(rad, h, rad), _leaf(0.86 + t * 0.28))
+		if detail > 0.85 and li == 0:
+			_add_prism(st, Vector3(rad * 0.35, y - 0.05, rad * 0.15),
+					Vector3(rad * 0.55, h * 0.7, rad * 0.55),
+					_leaf(0.93))
+	_add_prism(st, Vector3(0, base_y + 1.05 * detail, 0),
+			Vector3(0.18 * detail, 0.28 * detail, 0.18 * detail),
+			_leaf(1.16))
+	st.generate_normals()
+	return st.commit()
+
+func _make_willow_mesh(detail: float) -> ArrayMesh:
+	var st := SurfaceTool.new()
+	st.begin(Mesh.PRIMITIVE_TRIANGLES)
+	_add_prism(st, Vector3(0, 0.55, 0), Vector3(0.10, 1.1, 0.10), _wood(1.05))
+	# Drooping lobes — wider than tall, hanging off a short trunk.
+	for i in 3:
+		var a: float = float(i) * TAU / 3.0
+		var ox := cos(a) * 0.35 * detail
+		var oz := sin(a) * 0.35 * detail
+		_add_prism(st, Vector3(ox, 0.95 + float(i % 2) * 0.15, oz),
+				Vector3(0.55 * detail, 0.70 * detail, 0.55 * detail),
+				_leaf(0.92 + float(i % 2) * 0.12))
+	_add_prism(st, Vector3(0, 1.35 * detail, 0), Vector3(0.40 * detail, 0.35 * detail, 0.40 * detail),
+			_leaf(1.14))
+	st.generate_normals()
+	return st.commit()
+
+func _make_scrub_mesh(detail: float) -> ArrayMesh:
+	var st := SurfaceTool.new()
+	st.begin(Mesh.PRIMITIVE_TRIANGLES)
+	# Low multi-stem bush — no tall trunk.
+	for i in 4:
+		var a: float = float(i) * 1.7
+		var ox := cos(a) * 0.22 * detail
+		var oz := sin(a) * 0.22 * detail
+		_add_prism(st, Vector3(ox, 0.28 * detail, oz),
+				Vector3(0.18 * detail, 0.55 * detail, 0.18 * detail),
+				_wood(1.15))
+	_add_prism(st, Vector3(0, 0.55 * detail, 0),
+			Vector3(0.55 * detail, 0.45 * detail, 0.55 * detail),
+			_leaf(1.05))
+	st.generate_normals()
+	return st.commit()
+
+func _make_reed_mesh(detail: float) -> ArrayMesh:
+	var st := SurfaceTool.new()
+	st.begin(Mesh.PRIMITIVE_TRIANGLES)
+	for i in 5:
+		var a: float = float(i) * 1.25
+		var ox := cos(a) * 0.12 * detail
+		var oz := sin(a) * 0.12 * detail
+		var h: float = (0.9 + float(i % 3) * 0.25) * detail
+		_add_prism(st, Vector3(ox, h * 0.5, oz), Vector3(0.05, h, 0.05),
+				_leaf(0.90 + float(i % 3) * 0.10))
+		# Seed head — straw, which is nearer wood than leaf.
+		_add_prism(st, Vector3(ox, h + 0.08, oz), Vector3(0.08, 0.12, 0.08),
+				_wood(1.55))
+	st.generate_normals()
+	return st.commit()
+
+func _make_orchard_mesh(detail: float) -> ArrayMesh:
+	var st := SurfaceTool.new()
+	st.begin(Mesh.PRIMITIVE_TRIANGLES)
+	_add_prism(st, Vector3(0, 0.55, 0), Vector3(0.11, 1.1, 0.11), _wood(1.0))
+	_add_prism(st, Vector3(0, 1.15 * detail, 0), Vector3(0.55 * detail, 0.55 * detail, 0.55 * detail),
+			_leaf(1.0))
+	_add_prism(st, Vector3(0.25 * detail, 1.05 * detail, 0.1), Vector3(0.28 * detail, 0.28 * detail, 0.28 * detail),
+			_fruit(0.95))
+	_add_prism(st, Vector3(-0.2 * detail, 1.2 * detail, -0.12), Vector3(0.22 * detail, 0.22 * detail, 0.22 * detail),
+			_fruit(1.12))
+	st.generate_normals()
+	return st.commit()
+
+func _make_tree_mesh(detail: float) -> ArrayMesh:
+	return _make_broadleaf_mesh(detail)
 
 func _make_billboard_mesh() -> ArrayMesh:
 	var st := SurfaceTool.new()
 	st.begin(Mesh.PRIMITIVE_TRIANGLES)
-	_add_quad(st, Vector3(0, 0.7, 0), Vector3(1.4, 1.4, 0.05), Color(0.16, 0.34, 0.14))
+	# Soft diamond silhouette for far LOD — less "playing-card forest".
+	_add_quad(st, Vector3(0, 0.55, 0), Vector3(1.1, 1.1, 0.05), _leaf(0.92))
+	_add_quad(st, Vector3(0, 0.85, 0), Vector3(0.7, 0.7, 0.04), _leaf(1.06))
 	st.generate_normals()
 	return st.commit()
 
@@ -1589,19 +3267,22 @@ func _make_plant_layer(layer_name: String, mesh: Mesh, fade_min: float, fade_max
 	mm.set_instance_color(0, Color(1, 1, 1, 0))
 	var mi := MultiMeshInstance3D.new()
 	mi.multimesh = mm
-	var mat := StandardMaterial3D.new()
-	mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
-	mat.vertex_color_use_as_albedo = true
-	mat.distance_fade_mode = BaseMaterial3D.DISTANCE_FADE_PIXEL_DITHER
-	mat.distance_fade_min_distance = fade_min
-	mat.distance_fade_max_distance = fade_max
-	mat.cull_mode = BaseMaterial3D.CULL_DISABLED
+	# Same flat-white-albedo trap the craft stations fell into: unshaded with
+	# vertex colours and a default albedo renders vegetation as cardboard.
+	var mat := ShaderMaterial.new()
+	mat.shader = load("res://shaders/tree.gdshader")
+	mat.set_shader_parameter("haze_start", fade_min * 0.6)
+	mat.set_shader_parameter("haze_end", fade_max * 3.0)
+	mat.set_shader_parameter("fade_start", fade_min)
+	mat.set_shader_parameter("fade_end", fade_max)
+	mat.set_shader_parameter("model_height", 2.15)
+	mat.set_shader_parameter("sway", 0.10)
 	mi.material_override = mat
 	mi.name = layer_name
 	add_child(mi)
 	return mi
 
-const PLANT_STRIDE := 7  # theta,z,stem,leaf,alive,lod,biome_id
+const PLANT_STRIDE := 8  # theta,z,stem,leaf,alive,lod,biome_id,genome_id
 const BIOME_PLANT_COL := [
 	Color(0.18, 0.38, 0.36), # water edge
 	Color(0.14, 0.42, 0.28), # wetland
@@ -1612,25 +3293,93 @@ const BIOME_PLANT_COL := [
 	Color(0.28, 0.36, 0.28), # alpine
 	Color(0.42, 0.40, 0.34), # bare rock sparse
 	Color(0.30, 0.48, 0.18), # farm
+	Color(0.12, 0.36, 0.24), # swamp
+	Color(0.24, 0.50, 0.16), # meadow
+	Color(0.52, 0.44, 0.22), # desert
+	Color(0.62, 0.52, 0.28), # dune
+	Color(0.58, 0.54, 0.40), # shore
 ]
 
 func _refresh_plants() -> void:
-	# Immediate full refresh (startup / load). Streaming path is _tick_plant_fill.
-	if plant_mm == null or player == null:
+	if plant_species_near.is_empty() or player == null:
 		return
 	last_plants_alive = int(last_sim.get("plants", -1))
 	plant_anchor = Vector2(player.theta, player.z)
-	plant_data = terrain.plants_lod(player.theta, player.z, 900)
-	var buckets: Array = [[], [], []]
-	var n: int = int(plant_data.size() / float(PLANT_STRIDE))
+	plant_data = terrain.plants_lod(player.theta, player.z, plant_lod_radius)
+	var stride: int = PLANT_STRIDE if plant_data.size() % PLANT_STRIDE == 0 else 7
+	# Buckets: [lod][species] → index list
+	var buckets: Array = []
+	for _lod in 3:
+		var sp: Array = [[], [], [], [], [], []]
+		buckets.append(sp)
+	var n: int = int(plant_data.size() / float(stride))
 	for i in n:
-		var lod: int = clampi(int(plant_data[i * PLANT_STRIDE + 5]), 0, 2)
-		buckets[lod].append(i)
-	_fill_plant_bucket(plant_mm, plant_data, buckets[0], 1.0)
-	_fill_plant_bucket(plant_mm_mid, plant_data, buckets[1], 1.25)
-	_fill_plant_bucket(plant_mm_far, plant_data, buckets[2], 1.7)
+		var base: int = i * stride
+		var lod: int = clampi(int(plant_data[base + 5]), 0, 2)
+		var bid: int = clampi(int(plant_data[base + 6]), 0, BIOME_PLANT_COL.size() - 1)
+		var genome: int = int(plant_data[base + 7]) if stride >= 8 else -1
+		var sp: int = _biome_species(bid, genome)
+		buckets[lod][sp].append(i)
+	for sp in 6:
+		_fill_plant_bucket(plant_species_near[sp], plant_data, buckets[0][sp], 1.0, stride)
+		_fill_plant_bucket(plant_species_mid[sp], plant_data, buckets[1][sp], 1.25, stride)
+	# Far: merge all species into one billboard layer.
+	var far_idx: Array = []
+	for sp in 6:
+		far_idx.append_array(buckets[2][sp])
+	_fill_plant_bucket(plant_mm_far, plant_data, far_idx, 1.7, stride)
 
-func _fill_plant_bucket(mi: MultiMeshInstance3D, data: PackedFloat32Array, indices: Array, scale_boost: float) -> void:
+func _plant_instance_xform(data: PackedFloat32Array, i: int, scale_boost: float, stride: int = PLANT_STRIDE) -> Transform3D:
+	var base: int = i * stride
+	var th: float = data[base]
+	var zz: float = data[base + 1]
+	var stem: float = data[base + 2]
+	var leaf: float = data[base + 3]
+	var bid: int = clampi(int(data[base + 6]), 0, BIOME_PLANT_COL.size() - 1)
+	var genome: int = int(data[base + 7]) if stride >= 8 else -1
+	var sp: int = _biome_species(bid, genome)
+	var gr: float = terrain.ground_radius(th, zz)
+	var h: float = clampf(0.55 + stem * 3.8 + leaf * 1.2, 0.7, 7.5) * scale_boost
+	# Scrub / reed stay short.
+	if sp == 3 or sp == 4:
+		h = clampf(0.4 + stem * 1.2 + leaf * 0.6, 0.35, 2.4) * scale_boost
+	if sp == 5:
+		h = clampf(0.7 + stem * 2.2 + leaf * 0.8, 0.8, 4.0) * scale_boost
+	var xf := frame_at(th, zz, gr)
+	var jit: float = fposmod(sin(th * 733.1 + zz * 41.7) * 43758.5453, 1.0)
+	var jit2: float = fposmod(sin(th * 191.3 - zz * 97.1) * 24634.6345, 1.0)
+	xf.basis = xf.basis.rotated(xf.basis.y, jit * TAU)
+	xf.basis = xf.basis.rotated(xf.basis.z, (jit2 - 0.5) * 0.28)
+	xf.basis = xf.basis.rotated(xf.basis.x, (jit - 0.5) * 0.12)
+	var w: float = (0.55 + leaf * 1.05) * scale_boost * (0.78 + jit2 * 0.52)
+	if sp == 3:
+		w *= 1.35
+	if sp == 4:
+		w *= 0.55
+	xf.basis = xf.basis.scaled(Vector3(w, h * (0.82 + jit * 0.40), w))
+	return xf
+
+func _plant_instance_color(data: PackedFloat32Array, i: int, stride: int = PLANT_STRIDE) -> Color:
+	var base: int = i * stride
+	var stem: float = data[base + 2]
+	var leaf: float = data[base + 3]
+	var bid: int = clampi(int(data[base + 6]), 0, BIOME_PLANT_COL.size() - 1)
+	var th: float = data[base]
+	var zz: float = data[base + 1]
+	var jit: float = fposmod(sin(th * 733.1 + zz * 41.7) * 43758.5453, 1.0)
+	var jit2: float = fposmod(sin(th * 191.3 - zz * 97.1) * 24634.6345, 1.0)
+	var base_col: Color = BIOME_PLANT_COL[bid]
+	var tint := Color(
+		base_col.r + leaf * 0.10 - stem * 0.02 + (jit - 0.5) * 0.08,
+		base_col.g + leaf * 0.14 + (jit2 - 0.5) * 0.06,
+		base_col.b + stem * 0.03 + (jit - 0.5) * 0.04)
+	if jit > 0.82:
+		tint = tint.lerp(Color(0.36, 0.34, 0.12), 0.35)
+	elif jit < 0.12:
+		tint = tint.lerp(Color(0.08, 0.28, 0.18), 0.30)
+	return tint
+
+func _fill_plant_bucket(mi: MultiMeshInstance3D, data: PackedFloat32Array, indices: Array, scale_boost: float, stride: int = PLANT_STRIDE) -> void:
 	if mi == null:
 		return
 	var n: int = indices.size()
@@ -1640,30 +3389,17 @@ func _fill_plant_bucket(mi: MultiMeshInstance3D, data: PackedFloat32Array, indic
 	mi.multimesh.instance_count = n
 	for j in n:
 		var i: int = indices[j]
-		var base: int = i * PLANT_STRIDE
-		var th: float = data[base]
-		var zz: float = data[base + 1]
-		var stem: float = data[base + 2]
-		var leaf: float = data[base + 3]
-		var bid: int = clampi(int(data[base + 6]), 0, BIOME_PLANT_COL.size() - 1)
-		var gr: float = terrain.ground_radius(th, zz)
-		var h: float = clampf(0.55 + stem * 3.8 + leaf * 1.2, 0.7, 7.5) * scale_boost
-		var xf := frame_at(th, zz, gr)
-		var w: float = (0.55 + leaf * 1.05) * scale_boost
-		xf.basis = xf.basis.scaled(Vector3(w, h, w))
-		mi.multimesh.set_instance_transform(j, xf)
-		var base_col: Color = BIOME_PLANT_COL[bid]
-		var tint := Color(
-			base_col.r + leaf * 0.10 - stem * 0.02,
-			base_col.g + leaf * 0.14,
-			base_col.b + stem * 0.03)
-		mi.multimesh.set_instance_color(j, tint)
+		mi.multimesh.set_instance_transform(j, _plant_instance_xform(data, i, scale_boost, stride))
+		mi.multimesh.set_instance_color(j, _plant_instance_color(data, i, stride))
 
 # ------------------------------------------------------------------ player --
 
 func _build_player() -> void:
 	player = load("res://scripts/player.gd").new()
 	player.world = self
+	# Far plane must clear the whole drum. 5200 m clipped the last kilometre of
+	# a 6264 m diagonal, which is the hard curved edge where the land stopped.
+	player.cam_far = drum_diagonal() * 1.15
 	player.theta = spawn["theta"]
 	player.z = spawn["z"]
 	player.r = float(spawn["radius"]) - 0.2
@@ -1692,22 +3428,19 @@ func _build_overlays() -> void:
 	rl.add_child(reticle)
 	add_child(rl)
 
-	var ui := CanvasLayer.new()
-	ui.layer = 2
+	var hud_layer := CanvasLayer.new()
+	hud_layer.layer = 2
 	hud = Label.new()
 	hud.position = Vector2(22, 16)
 	hud.add_theme_font_size_override("font_size", 13)
 	hud.add_theme_color_override("font_color", Color(0.86, 0.92, 0.95))
 	hud.add_theme_color_override("font_outline_color", Color(0, 0, 0, 0.85))
 	hud.add_theme_constant_override("outline_size", 5)
-	ui.add_child(hud)
-	add_child(ui)
+	hud_layer.add_child(hud)
+	add_child(hud_layer)
 
 func _process(_dt: float) -> void:
-	# Dig bursts: clear remesh backlog first (2/frame). Idle: keep streaming.
-	var remesh_budget := 2 if dig_held or remesh_queue.size() > 0 else 1
-	_pump_chunks(1 if remesh_queue.is_empty() else 0)
-	_drain_remesh(remesh_budget)
+	_tick_streaming()
 	_tick_daylight(_dt)
 	_tick_flow_refresh(_dt)
 	_tick_pool_refresh(_dt)
@@ -1721,26 +3454,76 @@ func _process(_dt: float) -> void:
 	_tick_splash(_dt)
 	_tick_catchment_pulse(_dt)
 	_tick_autosave(_dt)
-	_tick_water_audio()
+	_tick_water_audio(_dt)
 	_tick_panels()
+	_tick_life_layers(_dt)
+	_tick_agent_rigs(_dt)
 	refresh_grass()
+	refresh_mid()
 	if hud and player:
-		var e: float = terrain.elevation(player.theta, player.z)
-		var fx: float = terrain.water_flux(player.theta, player.z)
-		match player.view:
-			1:
-				hud.text = _hud_drum()
-			2:
-				hud.text = _hud_map(e, fx)
-			_:
-				hud.text = _hud_colonist(e, fx)
+		if ui == null:
+			_build_hud()
+		hud.visible = false
+		_tick_hud(_dt)
 
-func _tick_water_audio() -> void:
+func _tick_hud(dt: float) -> void:
+	# Clock / toast every frame; soil/weather/inventory FFI at ~8 Hz.
+	_hud_accum += dt
+	var heavy := _hud_accum >= 0.12 or Engine.get_process_frames() < 4
+	if heavy:
+		_hud_accum = 0.0
+		_hud_e = terrain.elevation(player.theta, player.z)
+		_hud_fx = terrain.water_flux(player.theta, player.z)
+		_water_dep = terrain.water_depth_at(player.theta, player.z)
+		_water_fx = _hud_fx
+	_push_hud(_hud_e, _hud_fx, heavy)
+
+func _tick_life_layers(dt: float) -> void:
+	# Never stack with a sim frame — that was the audible "every few seconds" dip.
+	if sim_frame_cooldown > 0:
+		return
+	# Spread grazer / rain / litter across frames so they never stack with sim_tick.
+	life_refresh_accum += dt
+	# Storms want fresher curtains; clear weather can idle longer.
+	var period: float = 0.48 if sky_event == 2 else 0.85
+	if life_refresh_accum < period:
+		return
+	life_refresh_accum = 0.0
+	match life_phase % 3:
+		0:
+			_refresh_grazers()
+		1:
+			_refresh_rain()
+		_:
+			_refresh_litter()
+	life_phase += 1
+
+func _tick_water_audio(dt: float = 0.016) -> void:
 	if audio == null or player == null or terrain == null:
 		return
-	var dep: float = terrain.water_depth_at(player.theta, player.z)
-	var fx: float = terrain.water_flux(player.theta, player.z)
-	audio.water_ambience(dep, fx)
+	_audio_accum += dt
+	if _audio_accum >= 0.14:
+		_audio_accum = 0.0
+		_water_dep = terrain.water_depth_at(player.theta, player.z)
+		_water_fx = terrain.water_flux(player.theta, player.z)
+		# Biome reverb — rare; biome_at + ground_at every frame was hitch food.
+		var here := Vector2(player.theta, player.z)
+		if here.distance_squared_to(water_bio_cache_at) > 0.0004:
+			water_bio_cache_at = here
+			var bio: Dictionary = terrain.biome_at(player.theta, player.z)
+			water_bio_name = str(bio.get("name", ""))
+		var ground: float = ground_at(player.theta, player.z)
+		var underground: bool = player.r < ground - 2.0
+		if audio.has_method("set_biome_reverb"):
+			audio.set_biome_reverb(water_bio_name, underground)
+	# Cylinder wrap: angular distance around the drum attenuates like a corridor (§2144).
+	var wrap_factor := 1.0
+	if P.has("radius"):
+		var R: float = float(P["radius"])
+		var around := fposmod(absf(player.theta), TAU)
+		around = minf(around, TAU - around)
+		wrap_factor = clampf(1.0 - (around * R) / (R * PI * 0.55), 0.2, 1.0)
+	audio.water_ambience(_water_dep, _water_fx, wrap_factor)
 
 func _tick_catchment_pulse(dt: float) -> void:
 	# Pulse material only — remeshing the ribbon every few frames was a hitch.
@@ -1770,21 +3553,26 @@ func _autosave_slot() -> void:
 	if fs:
 		fs.store_buffer(soil)
 		fs.close()
+	var dwell: PackedByteArray = terrain.save_dwellings()
+	var fd := FileAccess.open("user://rama_auto_%d_dwell.bin" % slot, FileAccess.WRITE)
+	if fd:
+		fd.store_buffer(dwell)
+		fd.close()
 	print("[rama] autosave slot %d" % slot)
 
 func _tick_biosphere(dt: float) -> void:
 	sim_accum += dt * SIM_STEP_DAYS
-	if sim_accum < 0.06:
+	# Smaller steps more often → soft ticks instead of one fat hitch every ~6s.
+	if sim_accum < 0.045:
 		return
-	var step: float = minf(sim_accum, 0.12)
-	sim_accum = 0.0
+	var step: float = minf(sim_accum, 0.032)
+	sim_accum -= step
 	if player != null:
 		terrain.set_player_pos(player.theta, player.z)
 	last_sim = terrain.sim_tick(step)
-	refresh_agents()
-	refresh_stockpiles()
-	refresh_carcasses()
-	# Defer Godot remesh/plant work off the sim frame so they never stack.
+	# Hold heavy visuals / life layers off this frame and the next.
+	sim_frame_cooldown = 2
+	agent_refresh_accum = 0.0
 	visuals_pending = true
 	visual_phase = 0
 	var pools: int = int(last_sim.get("pools", 0))
@@ -1797,29 +3585,42 @@ func _tick_biosphere(dt: float) -> void:
 		schedule_flow_refresh()
 
 func _tick_deferred_visuals() -> void:
+	if sim_frame_cooldown > 0:
+		sim_frame_cooldown -= 1
+		return
 	if not visuals_pending:
+		agent_refresh_accum += get_process_delta_time()
+		if agent_refresh_accum > 0.5:
+			agent_refresh_accum = 0.0
+			refresh_agents()
+			refresh_dwellings()
+			refresh_stockpiles()
+			refresh_carcasses()
 		return
 	match visual_phase:
 		0:
 			_maybe_queue_plants()
 		1:
-			# Foam/pools already debounce via schedule_pool_refresh — don't rebuild
-			# shore Multimesh on every quiet sim beat.
+			refresh_agents()
+		2:
+			refresh_dwellings()
+		3:
 			if float(last_sim.get("sediment", 0.0)) > 2.0:
 				_refresh_foam()
 				_refresh_biome_map()
-				# Don't sync-remesh a ring of chunks — queue one-at-a-time.
 				_queue_remesh_near_player()
 			else:
-				wet_refresh_in = 2.5
-		2:
+				wet_refresh_in = 3.2
+		4:
+			refresh_stockpiles()
+			refresh_carcasses()
 			_refresh_soil_overlay()
 			visuals_pending = false
 			return
 	visual_phase += 1
 
 func _maybe_queue_plants() -> void:
-	if player == null or plant_mm == null:
+	if player == null or plant_species_near.is_empty():
 		return
 	if plant_refresh_due:
 		return
@@ -1827,7 +3628,6 @@ func _maybe_queue_plants() -> void:
 	var anchor := Vector2(player.theta, player.z)
 	var moved: float = absf(wrapf(anchor.x - plant_anchor.x, -PI, PI)) * float(P["radius"])
 	moved += absf(anchor.y - plant_anchor.y)
-	# Skip full plant rebuild if nothing meaningful changed.
 	if alive == last_plants_alive and moved < 12.0 and plant_data.size() > 0:
 		return
 	last_plants_alive = alive
@@ -1840,85 +3640,21 @@ func _maybe_queue_plants() -> void:
 func _tick_plant_fill() -> void:
 	if not plant_refresh_due:
 		return
-	# Don't compete with chunk remesh — wait until the backlog drains.
 	if remesh_queue.size() > 0:
 		return
-	if player == null or plant_mm == null:
+	if player == null or plant_species_near.is_empty():
 		plant_refresh_due = false
 		return
-	# First frame: pull LOD sample from Rust, then stream transforms in budgets.
-	if plant_indices.is_empty() and plant_fill_j == 0 and plant_bucket_idx == 0:
-		plant_data = terrain.plants_lod(player.theta, player.z, 900)
-		var buckets: Array = [[], [], []]
-		var n: int = int(plant_data.size() / float(PLANT_STRIDE))
-		for i in n:
-			var lod: int = clampi(int(plant_data[i * PLANT_STRIDE + 5]), 0, 2)
-			buckets[lod].append(i)
-		plant_indices = buckets
-		_begin_plant_bucket(0)
-		return
-	_fill_plant_budget()
+	# Full refresh is cheaper than streaming 9 Multimeshes with tiny budgets.
+	_refresh_plants()
+	plant_refresh_due = false
+	plant_indices = []
 
-func _begin_plant_bucket(b: int) -> void:
-	plant_bucket_idx = b
-	plant_fill_j = 0
-	var layers: Array = [plant_mm, plant_mm_mid, plant_mm_far]
-	var boosts: Array = [1.0, 1.25, 1.7]
-	if b >= layers.size():
-		plant_refresh_due = false
-		plant_indices = []
-		return
-	var mi: MultiMeshInstance3D = layers[b]
-	var indices: Array = plant_indices[b] if b < plant_indices.size() else []
-	if mi == null:
-		_begin_plant_bucket(b + 1)
-		return
-	if indices.is_empty():
-		mi.multimesh.instance_count = 0
-		_begin_plant_bucket(b + 1)
-		return
-	mi.multimesh.instance_count = indices.size()
-	# stash boost on the multimesh via meta for the fill loop
-	mi.set_meta("plant_boost", boosts[b])
+func _begin_plant_bucket(_b: int) -> void:
+	plant_refresh_due = false
 
 func _fill_plant_budget() -> void:
-	var layers: Array = [plant_mm, plant_mm_mid, plant_mm_far]
-	if plant_bucket_idx >= layers.size():
-		plant_refresh_due = false
-		plant_indices = []
-		return
-	var mi: MultiMeshInstance3D = layers[plant_bucket_idx]
-	var indices: Array = plant_indices[plant_bucket_idx]
-	if mi == null or indices.is_empty():
-		_begin_plant_bucket(plant_bucket_idx + 1)
-		return
-	var boost: float = float(mi.get_meta("plant_boost", 1.0))
-	var n: int = indices.size()
-	var done := 0
-	while plant_fill_j < n and done < PLANT_FILL_BUDGET:
-		var i: int = indices[plant_fill_j]
-		var base: int = i * PLANT_STRIDE
-		var th: float = plant_data[base]
-		var zz: float = plant_data[base + 1]
-		var stem: float = plant_data[base + 2]
-		var leaf: float = plant_data[base + 3]
-		var bid: int = clampi(int(plant_data[base + 6]), 0, BIOME_PLANT_COL.size() - 1)
-		# ground_radius only — ground_below per plant was a multi-ms hitch.
-		var gr: float = terrain.ground_radius(th, zz)
-		var h: float = clampf(0.55 + stem * 3.8 + leaf * 1.2, 0.7, 7.5) * boost
-		var xf := frame_at(th, zz, gr)
-		var w: float = (0.55 + leaf * 1.05) * boost
-		xf.basis = xf.basis.scaled(Vector3(w, h, w))
-		mi.multimesh.set_instance_transform(plant_fill_j, xf)
-		var base_col: Color = BIOME_PLANT_COL[bid]
-		mi.multimesh.set_instance_color(plant_fill_j, Color(
-			base_col.r + leaf * 0.10 - stem * 0.02,
-			base_col.g + leaf * 0.14,
-			base_col.b + stem * 0.03))
-		plant_fill_j += 1
-		done += 1
-	if plant_fill_j >= n:
-		_begin_plant_bucket(plant_bucket_idx + 1)
+	plant_refresh_due = false
 
 func _tick_wet_refresh(dt: float) -> void:
 	if wet_refresh_in < 0.0:
@@ -1951,12 +3687,28 @@ func save_world() -> void:
 	if fs:
 		fs.store_buffer(soil)
 		fs.close()
+	var dwell: PackedByteArray = terrain.save_dwellings()
+	var fd := FileAccess.open(SAVE_DWELL, FileAccess.WRITE)
+	if fd:
+		fd.store_buffer(dwell)
+		fd.close()
 	var props := {
 		"modules": [],
 		"waypoint": [waypoint.x, waypoint.y],
 		"has_waypoint": has_waypoint,
 		"home": [home.x, home.y],
+		"clock": clock,
+		"saved_unix": Time.get_unix_time_from_system(),
 	}
+	if player:
+		props["player"] = {
+			"theta": player.theta,
+			"z": player.z,
+			"yaw": player.yaw,
+			"pitch": player.pitch,
+			"eye": player.eye,
+			"view": player.view,
+		}
 	for m in modules:
 		if m == null or not is_instance_valid(m):
 			continue
@@ -1971,7 +3723,7 @@ func save_world() -> void:
 	if fw:
 		fw.store_string(JSON.stringify(props))
 		fw.close()
-	print("[rama] saved digs + soil + %d modules → user://" % props["modules"].size())
+	print("[rama] saved digs + soil + dwellings + %d modules → user://" % props["modules"].size())
 
 func load_world() -> void:
 	if not FileAccess.file_exists(SAVE_PATH):
@@ -1990,6 +3742,12 @@ func load_world() -> void:
 		if fs:
 			terrain.load_soil(fs.get_buffer(fs.get_length()))
 			fs.close()
+	if FileAccess.file_exists(SAVE_DWELL):
+		var fd := FileAccess.open(SAVE_DWELL, FileAccess.READ)
+		if fd:
+			if not terrain.load_dwellings(fd.get_buffer(fd.get_length())):
+				print("[rama] load_dwellings failed")
+			fd.close()
 	if FileAccess.file_exists(SAVE_WORLD):
 		var fw := FileAccess.open(SAVE_WORLD, FileAccess.READ)
 		if fw:
@@ -2003,6 +3761,10 @@ func load_world() -> void:
 	_refresh_biome_map()
 	_refresh_soil_overlay()
 	_remesh_near_player()
+	refresh_dwellings()
+	_refresh_litter()
+	_refresh_rain()
+	_refresh_grazers()
 	census = terrain.biome_census(260)
 	print("[rama] loaded digs (%d strokes)" % terrain.edit_count())
 
@@ -2021,6 +3783,34 @@ func _load_world_props(props: Dictionary) -> void:
 		var zz: float = float(spec.get("z", 0.0))
 		var p := to_world(th, zz, ground_at(th, zz))
 		place_module(p, kind, true)
+	# Resume camera exactly (§2180).
+	var pl: Variant = props.get("player", null)
+	if typeof(pl) == TYPE_DICTIONARY and player:
+		player.theta = float(pl.get("theta", player.theta))
+		player.z = float(pl.get("z", player.z))
+		player.yaw = float(pl.get("yaw", player.yaw))
+		player.pitch = float(pl.get("pitch", player.pitch))
+		player.eye = float(pl.get("eye", player.eye))
+		player.view = int(pl.get("view", 0))
+		player.r = ground_at(player.theta, player.z)
+		player.cam_ready = false
+		apply_view(player.view)
+		player._update_camera()
+	if props.has("clock"):
+		var prev: float = float(props["clock"])
+		var dt_days: float = clock - prev
+		if absf(dt_days) > 0.05:
+			away_blurb = "while you were away: %.1f habitat-days passed" % absf(dt_days)
+		else:
+			var saved_unix: float = float(props.get("saved_unix", 0.0))
+			if saved_unix > 0.0:
+				var hrs: float = (Time.get_unix_time_from_system() - saved_unix) / 3600.0
+				if hrs > 0.25:
+					away_blurb = "welcome back — %.1f hours real-time since last save" % hrs
+	if props.has("home"):
+		var hm: Array = props["home"]
+		if hm.size() >= 2:
+			home = Vector2(float(hm[0]), float(hm[1]))
 
 func refresh_catchment_at(th: float, zz: float) -> void:
 	# Only mark dirty — rebuilding the ribbon from _draw while panning was the
@@ -2059,7 +3849,7 @@ func _queue_remesh_near_player() -> void:
 				continue
 			remesh_queue.append(k)
 
-func _drain_remesh(budget: int = 1) -> void:
+func _drain_remesh(budget: int = 1, t0: int = -1) -> void:
 	var n := 0
 	while remesh_queue.size() > 0 and n < budget:
 		var k: String = remesh_queue.pop_front()
@@ -2068,190 +3858,258 @@ func _drain_remesh(budget: int = 1) -> void:
 			continue
 		_build_chunk(int(parts[0]), int(parts[1]))
 		n += 1
+		if t0 >= 0 and _over_budget(t0):
+			break
 
 func _clock_str() -> String:
 	var phase: float = fposmod(clock / DAY_LENGTH, 1.0)
 	var mins: int = int(phase * 1440.0)
-	return "%02d:%02d" % [int(mins / 60.0), mins % 60]
+	var t := "%02d:%02d" % [int(mins / 60.0), mins % 60]
+	if day_speed > 1.05:
+		t += " ×%.0f" % day_speed
+	return t
 
-func _hud_colonist(e: float, fx: float) -> String:
-	var aim_mat := ""
-	if player.last_aim.get("hit", false):
-		var pr: Dictionary = terrain.probe(player.last_aim["point"])
-		var grade: float = float(pr.get("ore_grade", 0.0))
-		aim_mat = "LOOKING   %s  (hardness %.1f · %.0f kg/m³" % [
-			pr.get("material", pr.get("kind", "?")), pr.get("hardness", 1.0),
-			pr.get("bulk_kg_m3", 0.0)]
-		if grade > 0.02:
-			aim_mat += " · ore %.0f%%" % (grade * 100.0)
-		aim_mat += ")"
-		if player.last_aim.has("yield_kg"):
-			aim_mat += "\nLAST DIG  %.1f kg  (kept %.0f%%)" % [
-				float(player.last_aim["yield_kg"]),
-				float(player.last_aim.get("yield_accepted", 1.0)) * 100.0]
+## Panels are declared once, as data. Adding a readout is one add_row call.
+func _build_hud() -> void:
+	ui = load("res://scripts/ui/hud.gd").new()
+	add_child(ui)
+	if audio and audio.has_method("_caption"):
+		audio.caption_cb = func(t: String):
+			note(t)
+	if ui.has_method("apply_font_scale"):
+		ui.apply_font_scale(RamaControls.font_scale)
+
+	var hab = ui.panel("habitat", "KEPLER DRUM")
+	hab.add_row("clock", "time")
+	hab.add_row("light", "daylight", true)
+	hab.add_row("grav", "gravity")
+
+	var you = ui.panel("you", "COLONIST")
+	you.add_row("pos", "position")
+	you.add_row("elev", "elevation")
+	you.add_row("pack", "pack", true)
+	you.add_row("enc", "encumbrance", true)
+	you.add_row("home", "home")
+
+	var grd = ui.panel("ground", "GROUND")
+	grd.add_row("biome", "biome")
+	grd.add_row("npk", "N-P-K")
+	grd.add_row("moist", "moisture", true)
+	grd.add_row("ph", "pH")
+	grd.add_row("drain", "drainage", true)
+
+	var wx = ui.panel("weather", "WEATHER")
+	wx.add_row("sky", "conditions")
+	wx.add_row("temp", "temperature")
+	wx.add_row("humid", "humidity", true)
+
+	var srv = ui.panel("survey", "HABITAT SURVEY")
+	srv.add_row("area", "surface")
+	srv.add_row("arable", "arable", true)
+	srv.add_row("relief", "relief")
+	srv.add_row("water", "open water", true)
+	srv.add_row("alluvial", "alluvial flat", true)
+	srv.add_row("grass", "grassland", true)
+	srv.add_row("upland", "upland", true)
+	srv.add_row("rock", "bare rock", true)
+
+	var pln = ui.panel("plan", "LOCAL PLAN")
+	pln.add_row("scale", "scale")
+	pln.add_row("along", "along drum")
+	pln.add_row("around", "around drum")
+	pln.add_row("mods", "installed")
+
+	var col = ui.panel("colony", "COLONY")
+	col.add_row("power", "power", true)
+	col.add_row("air", "air")
+	col.add_row("life", "life")
+	col.add_row("people", "colonists")
+
+	# Whose place you are standing in. Without this the whole legibility
+	# ladder — who is reachable and who is not — is invisible.
+	var plc = ui.panel("place", "NEAREST PLACE")
+	plc.add_row("who", "who")
+	plc.add_row("reach", "reach")
+	plc.add_row("people", "people", true)
+	plc.add_row("food", "keeping", true)
+	plc.add_row("ground", "ground")
+	plc.add_row("dist", "distance")
+
+var _place_near := false
+var _place_id := -1
+
+## Distance, in metres along the ground, to a point on the drum.
+func _arc_dist(th_a: float, z_a: float, th_b: float, z_b: float) -> float:
+	var dth: float = wrapf(th_a - th_b, -PI, PI) * float(P["radius"])
+	var dz: float = z_a - z_b
+	return sqrt(dth * dth + dz * dz)
+
+## Whose ground you are on. Shown within a claim and a bit beyond, so walking
+## into a valley tells you who lives in it before you meet him.
+const PLACE_SHOW_M := 220.0
+
+func _push_place() -> void:
+	var buf: PackedFloat32Array = terrain.dwellings_lod()
+	var best := -1
+	var best_d := 1e9
+	for i in int(buf.size() / 9.0):
+		var d: float = _arc_dist(player.theta, player.z, buf[i * 9], buf[i * 9 + 1])
+		if d < best_d:
+			best_d = d
+			best = i
+	_place_near = best >= 0 and best_d < PLACE_SHOW_M
+	if not _place_near:
+		_place_id = -1
+		return
+	var aid: int = int(buf[best * 9 + 8])
+	var info: Dictionary = terrain.dwelling_info(aid)
+	if not info.get("ok", false):
+		_place_near = false
+		return
+	_place_id = aid
+	ui.put("place", "who", "%s  ·  %s" % [info["name"], info["kind"]])
+	var reach: String = str(info.get("reach", "legible"))
+	if reach == "contested" and info.has("rival"):
+		reach = "contested with %s" % info["rival"]
+	ui.put("place", "reach", reach)
+	var cap: float = float(info.get("capacity", 0.0))
+	var fol: float = float(info.get("followers", 0.0))
+	var target: float = maxf(cap - 1.0, 0.0)
+	if cap < 1.0:
+		ui.put("place", "people", "cannot feed one man", 1.0)
 	else:
-		aim_mat = "LOOKING   —"
-	var inv: Dictionary = terrain.inventory()
-	var stacks: Array = inv.get("stacks", [])
-	var pack_line := "PACK      %.1f / %.0f kg · %.0f / %.0f L · enc %.0f%%" % [
-		float(inv.get("mass_kg", 0.0)), float(inv.get("max_mass_kg", 45.0)),
-		float(inv.get("loose_m3", 0.0)) * 1000.0, float(inv.get("max_volume_m3", 0.04)) * 1000.0,
-		float(inv.get("encumbrance", 1.0)) * 100.0]
-	if stacks.size() > 0:
-		var bits: PackedStringArray = PackedStringArray()
-		for s in stacks:
-			var bit := "%s %.1fkg" % [s.get("name", "?"), float(s.get("mass_kg", 0.0))]
-			if float(s.get("grade", 0.0)) > 0.02:
-				bit += " @%.0f%%" % (float(s.get("grade", 0.0)) * 100.0)
-			bits.append(bit)
-		pack_line += "\n          " + ", ".join(bits)
-	var atmo: Dictionary = terrain.atmosphere()
-	var atmo_line := "AIR       O₂ %.0f kg (%.1f%%) · CO₂ %.0f ppm · scrub %.1f MW · GH %d" % [
-		float(atmo.get("o2_kg", 0.0)), float(atmo.get("o2_frac", 0.0)) * 100.0,
-		float(atmo.get("co2_ppm", 0.0)), float(atmo.get("scrub_mw", 0.0)),
-		int(terrain.greenhouse_count())]
-	var npp: Dictionary = terrain.npp_at(player.theta, player.z)
-	var npp_line := "NPP       %.0f g/m²/yr · producer %.2f · fear %.2f · max fauna ~%.0f kg" % [
-		float(npp.get("npp", 0.0)), float(npp.get("producer", 0.0)),
-		float(npp.get("fear", 0.0)), float(last_sim.get("max_fauna_kg", 0.0))]
-	npp_line += "\n          carcasses %d · kills %d · mean fear %.2f" % [
-		int(last_sim.get("carcasses", 0)), int(last_sim.get("kills", 0)),
-		float(last_sim.get("mean_fear", 0.0))]
-	var rec: Dictionary = terrain.recipe_at(player.recipe_idx)
-	var near_st := "ok" if (not bool(rec.get("needs_station", false)) or bool(rec.get("station_near", true))) else "NEED"
-	var craft_line := "CRAFT     [%d/%d] %s @%s [%s]  scale %.0f%%" % [
-		player.recipe_idx + 1, int(terrain.recipe_count()),
-		str(rec.get("id", "?")), str(rec.get("station", "?")), near_st,
-		float(rec.get("max_scale", 0.0)) * 100.0]
-	var led: Dictionary = terrain.materials_ledger()
-	var ledger_line := "LEDGER    pack %.1f kg · heaps %.1f kg · satiety %.0f%% · stations %d" % [
-		float(led.get("pack_mass_kg", 0.0)), float(led.get("heap_mass_kg", 0.0)),
-		float(led.get("satiety", 0.0)) * 100.0, int(led.get("stations", 0))]
-	var agents_n: int = int(last_sim.get("agents", 0))
-	var agent_line := "COLONISTS %d" % agents_n
-	if agents_n > 0:
-		var nearest_i := 0
-		var nearest_d := 1.0e9
-		var abuf: PackedFloat32Array = terrain.agents_lod()
-		var an: int = int(abuf.size() / 9.0)
-		for i in an:
-			var dth: float = absf(wrapf(abuf[i * 9] - player.theta, -PI, PI)) * float(P["radius"])
-			var dz: float = abuf[i * 9 + 1] - player.z
-			var dd: float = dth * dth + dz * dz
-			if dd < nearest_d:
-				nearest_d = dd
-				nearest_i = i
-		var nm: String = str(terrain.agent_name(nearest_i))
-		var said: String = str(terrain.agent_line(nearest_i))
-		var cite: Dictionary = terrain.affinity_cite(nearest_i)
-		var aff: float = float(cite.get("score", terrain.affinity_with(nearest_i)))
-		agent_line += " · nearest %s (%.0f m · affinity %.1f)" % [nm, sqrt(nearest_d), aff]
-		if bool(cite.get("has_cite", false)):
-			agent_line += "\n          cite d%.0f %s — %s" % [
-				float(cite.get("day", 0.0)), str(cite.get("kind", "?")), str(cite.get("label", ""))]
-		if said != "":
-			agent_line += "\n          " + said
-	var chron: PackedStringArray = terrain.chronicle_latest(1)
-	var chron_line := "CHRONICLE —"
-	if chron.size() > 0:
-		chron_line = "CHRONICLE " + chron[0]
-	var soil: Dictionary = terrain.soil_at(player.theta, player.z)
-	var wx: Dictionary = terrain.weather_at(player.theta, player.z)
+		ui.put("place", "people", "%d of %d the ground feeds" % [
+			int(round(fol)) + 1, int(round(cap))],
+			fol / maxf(target, 0.001))
+	# Gauge shows SCARCITY, so a full red bar means the same here as it does
+	# on every other gauge: at the limit.
+	var days: float = float(info.get("days_of_food", 0.0))
+	ui.put("place", "food", "%d days of food" % int(days),
+		1.0 - clampf(days / 60.0, 0.0, 1.0))
+	var q: float = float(info.get("quality", 0.0))
+	var qword: String = "poor" if q < 0.5 else ("workable" if q < 0.9 else "good")
+	ui.put("place", "ground", "%s  ·  %d works" % [qword, int(info.get("works", 0))])
+	ui.put("place", "dist", "%d m" % int(_arc_dist(
+		player.theta, player.z, float(info["theta"]), float(info["z"]))))
+
+func _push_hud(e: float, fx: float, heavy: bool = true) -> void:
+	var v: int = player.view
+	if RamaControls.photo_mode or RamaControls.hud_density == "off":
+		ui.visible = false
+		return
+	ui.visible = true
+	# Instruments show habitat-scale readouts; the colonist view shows local.
+	ui.show_panel("ground", v == 0)
+	ui.show_panel("weather", v == 0)
+	ui.show_panel("you", v != 1)
+	ui.show_panel("survey", v == 1)
+	ui.show_panel("plan", v == 2)
+	ui.show_panel("habitat", true)
+	ui.show_panel("colony", v == 0)
+	ui.show_panel("place", v != 2 and _place_near)
+	if ui.has_method("set_density"):
+		ui.set_density(RamaControls.hud_density)
+
+	# Always-cheap: clock, light, position — these change every frame in fast-day.
+	ui.put("habitat", "clock", _clock_str())
+	ui.put("habitat", "light", "%d%%" % int(day * 100.0), day)
+	var arc_m: float = fposmod(player.theta * float(P["radius"]), float(P["circumference"]))
+	ui.put("you", "pos", "%.0f m around  ·  z %+.0f m" % [arc_m, player.z])
+	ui.put("you", "elev", "%.1f m above hull" % e)
+	toast_t = maxf(toast_t - get_process_delta_time(), 0.0)
+	ui.toast(toast, clampf(toast_t, 0.0, 1.0))
+	if not heavy:
+		return
+
+	if v == 1:
+		var ar: float = float(census.get("arable_km2", 0.0)) / maxf(float(census.get("surface_area_km2", 1.0)), 0.001)
+		ui.put("survey", "area", "%.2f km²" % census["surface_area_km2"])
+		ui.put("survey", "arable", "%.2f km²  ·  %d%%" % [census["arable_km2"], int(ar * 100.0)], ar)
+		ui.put("survey", "relief", "%.0f – %.0f m  ·  mean %.0f" % [
+				census["min_elevation"], census["max_elevation"], census["mean_elevation"]])
+		# Biome census (14 ids) with legacy bins kept for glance.
+		for k in ["water", "wetland", "riparian", "grassland", "scrub",
+				"forest", "alpine", "bare_rock", "farm",
+				"swamp", "meadow", "desert", "dune", "shore",
+				"alluvial", "grass", "upland", "rock"]:
+			if not census.has(k):
+				continue
+			var fr: float = float(census[k])
+			ui.put("survey", k, "%.1f%%" % (fr * 100.0), fr)
+		if census.has("hypso_below_water"):
+			ui.put("survey", "seas", "%.1f%% below WL" % (float(census["hypso_below_water"]) * 100.0),
+					float(census["hypso_below_water"]))
+		if census.has("hypso_peak"):
+			ui.put("survey", "peaks", "%.1f%% high" % (float(census["hypso_peak"]) * 100.0),
+					float(census["hypso_peak"]))
+	elif v == 2:
+		ui.put("plan", "scale", "%d m across" % int(mini_size))
+		ui.put("plan", "along", "z %+.0f m" % player.z)
+		ui.put("plan", "around", "%.0f of %.0f m" % [
+				fposmod(player.theta * float(P["radius"]), float(P["circumference"])),
+				P["circumference"]])
+		ui.put("plan", "mods", "%d modules  ·  %d strokes" % [modules.size(), terrain.edit_count()])
+
+	ui.put("habitat", "grav", "%.2f m/s²  ·  %.0f m radius" % [P["gravity"], P["radius"]])
+
+	var pk: Dictionary = terrain.inventory()
+	var kg: float = float(pk.get("mass_kg", 0.0))
+	var maxkg: float = maxf(float(pk.get("max_mass_kg", 60.0)), 1.0)
+	var vfrac: float = float(pk.get("volume_frac", 0.0))
+	ui.put("you", "pack", "%.1f / %.0f kg  ·  %d%% vol" % [kg, maxkg, int(vfrac * 100.0)],
+			maxf(kg / maxkg, vfrac))
+	# Encumbrance is a movement MULTIPLIER, so show the penalty, not the value.
+	var encm: float = float(pk.get("encumbrance", 1.0))
+	ui.put("you", "enc", "%d%% speed" % int(encm * 100.0), 1.0 - clampf(encm, 0.0, 1.0))
+	ui.put("you", "home", home_bearing().split("\n")[0])
+
 	var bio: Dictionary = terrain.biome_at(player.theta, player.z)
-	var power: Dictionary = terrain.power_budget()
-	var wdep: float = terrain.water_depth_at(player.theta, player.z)
-	return ("KEPLER DRUM  %s   daylight %d percent\n"
-		+ "  radius %.0f m · length %.0f m · circumference %.0f m\n"
-		+ "  gravity %.2f m/s² · spin period %.1f s · seed 0x%X\n\n"
-		+ "POSITION  θ %.3f · z %+.0f m · elev %.1f m · drainage %.2f · water %.2f m\n"
-		+ "SOIL      N %.2f  P %.2f  K %.2f  moist %.2f  pH %.1f\n"
-		+ "WEATHER   rain %.2f  temp %.0f  humid %.2f  band %d  · %s\n"
-		+ "POWER     %.1f / %.1f MW  (headroom %.1f)  · condensers %d\n"
-		+ "LIFE      %d plants · lakes %d · pools %d (%.1f m) · stock %.0f t · flow %s\n"
-		+ "%s\n%s\n%s\n%s\n%s\n%s\n%s\n\n"
-		+ "%s\n%s\n\n"
-		+ "WASD move · Shift run · Space jump · scroll zoom\n"
-		+ "LEFT CLICK / F  dig      RIGHT CLICK / G  install %s\n"
-		+ "H harvest · X drop · K craft · J eat · Y station · M amend · U scrub\n"
-		+ "Q/E or side-scroll brush %.1f m (%s)\n"
-		+ "C brush · B mark · V scoop/pour · N soil · +/- zoom · 1-4 module\n"
-		+ "F5 save · F9 load · TAB view · Esc menu"
-	) % [_clock_str(), int(day * 100.0),
-		P["radius"], P["length"], P["circumference"],
-		P["gravity"], P["spin_period"], P["seed"],
-		player.theta, player.z, e, fx, wdep,
-		soil.get("n", 0.0), soil.get("p", 0.0), soil.get("k", 0.0),
-		soil.get("moisture", 0.0), soil.get("ph", 7.0),
-		wx.get("rain", 0.0), wx.get("temp", 0.0), wx.get("humidity", 0.0),
-		int(wx.get("band", 0)), str(bio.get("name", "?")),
-		float(power.get("used", 0.0)), float(power.get("budget", 0.0)),
-		float(power.get("headroom", 0.0)), int(power.get("condensers", 0)),
-		terrain.plant_count(), terrain.lake_count(),
-		int(last_sim.get("pools", 0)), float(last_sim.get("pool_depth", 0.0)),
-		float(last_sim.get("water_stock", 0.0)) / 1000.0,
-		("rerouting…" if terrain.flow_dirty() else "live"),
-		pack_line, atmo_line, npp_line, craft_line, ledger_line, agent_line, chron_line,
-		home_bearing(), aim_mat,
-		MODULES[player.module]["name"], player.brush,
-		"levelling" if player.level_brush else "sphere"]
+	ui.put("ground", "biome", str(bio.get("name", "—")))
+	var so: Dictionary = terrain.soil_at(player.theta, player.z)
+	ui.put("ground", "npk", "%.2f  %.2f  %.2f" % [
+			so.get("n", 0.0), so.get("p", 0.0), so.get("k", 0.0)])
+	var mo: float = float(so.get("moisture", 0.0))
+	ui.put("ground", "moist", "%.2f" % mo, mo)
+	ui.put("ground", "ph", "%.1f" % so.get("ph", 7.0))
+	ui.put("ground", "drain", "%.2f" % fx, fx)
 
-func _pct(frac: float) -> String:
-	return "%5.1f percent" % (frac * 100.0)
+	var w: Dictionary = terrain.weather_at(player.theta, player.z)
+	var rain: float = float(w.get("rain", 0.0))
+	var sev: int = int(w.get("sky_event", sky_event))
+	var sky_lbl := "clear"
+	if sev == 1:
+		sky_lbl = "fog"
+	elif sev == 2:
+		sky_lbl = "storm"
+	ui.put("weather", "sky", "%s  ·  rain %.2f  ·  band %d" % [
+			sky_lbl, rain, int(w.get("band", 0))])
+	ui.put("weather", "temp", "%.0f °C" % w.get("temp", 15.0))
+	var hu: float = float(w.get("humidity", 0.0))
+	ui.put("weather", "humid", "%.2f" % hu, hu)
 
-func _bar(frac: float) -> String:
-	var n: int = int(round(frac * 24.0))
-	return "█".repeat(n) + "·".repeat(24 - n)
+	var pw: Dictionary = terrain.power_budget()
+	var used: float = float(pw.get("used", 0.0))
+	var cap: float = maxf(float(pw.get("budget", 24.0)), 0.1)
+	ui.put("colony", "power", "%.1f / %.0f MW  ·  %d cond" % [
+			used, cap, int(pw.get("condensers", 0))], used / cap)
+	var air: Dictionary = terrain.atmosphere()
+	ui.put("colony", "air", "O₂ %.1f%%  ·  CO₂ %d ppm" % [
+			float(air.get("o2_frac", 0.209)) * 100.0, int(air.get("co2_ppm", 400.0))])
+	ui.put("colony", "life", "%d plants  ·  %d chunks" % [terrain.plant_count(), loaded.size()])
+	var an: int = int(last_sim.get("agents", 0))
+	var fol: float = float(last_sim.get("followers", 0.0))
+	ui.put("colony", "people", "%d named  ·  %d following" % [an, int(round(fol))])
+	_push_place()
 
-func _hud_drum() -> String:
-	return ("KEPLER DRUM — habitat survey        %s\n"
-		+ "══════════════════════════════════════════════\n"
-		+ "  surface area      %.2f km²\n"
-		+ "  arable            %.2f km²   (%d percent of surface)\n"
-		+ "  relief            %.0f – %.0f m   mean %.0f m\n"
-		+ "  waterline         %.0f m\n\n"
-		+ "BIOME COVER\n"
-		+ "  open water    %s %s\n"
-		+ "  alluvial flat %s %s\n"
-		+ "  grassland     %s %s\n"
-		+ "  upland        %s %s\n"
-		+ "  bare rock     %s %s\n\n"
-		+ "  Relief is engineered then weathered: structural ribs\n"
-		+ "  and shaped high ground. Drainage is LIVE — dig a trench\n"
-		+ "  and watch the rivers move. Materials have hardness.\n\n"
-		+ "TAB switch view"
-	) % [_clock_str(), census["surface_area_km2"], census["arable_km2"],
-		int((float(census["alluvial"]) + float(census["grass"])) * 100.0),
-		census["min_elevation"], census["max_elevation"], census["mean_elevation"],
-		P["water_level"],
-		_bar(census["water"]), _pct(census["water"]),
-		_bar(census["alluvial"]), _pct(census["alluvial"]),
-		_bar(census["grass"]), _pct(census["grass"]),
-		_bar(census["upland"]), _pct(census["upland"]),
-		_bar(census["rock"]), _pct(census["rock"])]
 
-func _hud_map(e: float, fx: float) -> String:
-	var arc_m: float = player.theta * float(P["radius"])
-	return ("LOCAL PLAN — 190 m across        %s\n"
-		+ "══════════════════════════════════════\n"
-		+ "  along drum   z %+.0f m\n"
-		+ "  around drum  %.0f m of %.0f m\n"
-		+ "  elevation    %.1f m above hull floor\n"
-		+ "  drainage     %.2f   %s\n"
-		+ "  modules      %d installed\n"
-		+ "  excavation   %d strokes\n\n"
-		+ "  Dig a trench across a slope — drainage is live.\n"
-		+ "  North is +z, along the axis. East wraps the drum.\n\n"
-		+ "TAB switch view"
-	) % [_clock_str(), player.z, fposmod(arc_m, float(P["circumference"])), P["circumference"],
-		e, fx,
-		("channel" if fx > 0.55 else ("alluvial — good ground" if fx > 0.40 else "dry slope")),
-		modules.size(), terrain.edit_count()]
+
 
 ## The overview views are instruments, not photographs: no lens blur, no dust,
 ## no cloud deck between you and the data.
 func apply_view(v: int) -> void:
 	if post_layer: post_layer.visible = (v == 0)
 	if dust: dust.visible = (v == 0)
+	if insects: insects.visible = (v == 0)
 	if cloud_node: cloud_node.visible = (v == 0)
 	# The survey view is not looking through 2.5 km of air at a photograph;
 	# it is reading the habitat. Pull the haze back so the land is legible.
@@ -2261,14 +4119,18 @@ func apply_view(v: int) -> void:
 ## Daylight is a schedule someone set, not an orbit. Dawn and dusk are events
 ## that choreograph fog, ambient, mist and far-side glow (1191–1195).
 func _tick_daylight(dt: float) -> void:
-	clock += dt
+	clock += dt * day_speed
 	var phase: float = fposmod(clock / DAY_LENGTH, 1.0)
 	# Long day, short dusk, short night: a colony optimises for growing hours.
 	day = clamp(smoothstep(0.02, 0.14, phase) - smoothstep(0.70, 0.90, phase), 0.0, 1.0)
 	day = 0.06 + 0.94 * day
 	RenderingServer.global_shader_parameter_set("rama_day", day)
-
-	# Band labels for one-shot cues.
+	# Travelling gust envelope — grass/trees read as one breathing field.
+	var gust: float = 0.45 + 0.35 * sin(clock * 0.31) + 0.20 * sin(clock * 0.77 + 1.4)
+	# Storm wind shove.
+	gust += sky_intensity * (0.55 if sky_event == 2 else 0.15)
+	RenderingServer.global_shader_parameter_set("rama_gust", clampf(gust, 0.15, 1.55))
+	# Band first so spine/carriage update before RamaSun proximity read.
 	var band := "day"
 	if phase < 0.12:
 		band = "dawn"
@@ -2276,12 +4138,41 @@ func _tick_daylight(dt: float) -> void:
 		band = "night"
 	elif phase > 0.68:
 		band = "dusk"
+	_sync_photothermal_spine(phase, band)
+	_aim_rama_sun()
+	_poll_sky_weather(dt)
+	bounce_accum += dt
+	# Only recompute opposite-wall bounce when we've moved or every ~5 s.
+	var need_bounce := bounce_accum > 5.0
+	if player != null and not need_bounce:
+		var here := Vector2(player.theta, player.z)
+		var moved: float = absf(wrapf(here.x - bounce_anchor.x, -PI, PI)) * float(P.get("radius", 900.0))
+		moved += absf(here.y - bounce_anchor.y)
+		need_bounce = moved > 80.0 and bounce_accum > 1.2
+	if need_bounce:
+		bounce_accum = 0.0
+		if player != null:
+			bounce_anchor = Vector2(player.theta, player.z)
+		_refresh_bounce_tint()
+	# Dusk settlement lights — works glow diegetically (Wave 1.5 / NEXT #5).
+	var dusk_boost: float = 0.0
+	if phase > 0.68:
+		dusk_boost = smoothstep(0.68, 0.92, phase) * 2.4
+		# Sunset hour peaks warmer / brighter before night.
+		dusk_boost *= 1.0 + smoothstep(0.72, 0.82, phase) * (1.0 - smoothstep(0.86, 0.95, phase)) * 0.55
+	if absf(dusk_boost - _last_dusk_boost) > 0.02:
+		_last_dusk_boost = dusk_boost
+		for mat in dwelling_mats:
+			if mat:
+				mat.set_shader_parameter("emission_boost", dusk_boost)
+
+	# Band labels for one-shot cues.
 	if band != last_day_band:
 		if band == "dawn":
 			steam_life = 4.5
-			print("[rama] dawn — mist lifting")
+			print("[rama] dawn — photothermal carriage entering")
 		elif band == "dusk":
-			print("[rama] dusk — far side waking")
+			print("[rama] dusk — carriage departing / rings holding")
 		last_day_band = band
 
 	var env: Environment = world_env.environment if world_env else null
@@ -2292,71 +4183,136 @@ func _tick_daylight(dt: float) -> void:
 			mist = smoothstep(0.0, 0.08, phase) * (1.0 - smoothstep(0.12, 0.22, phase))
 		elif phase > 0.92:
 			mist = smoothstep(0.92, 1.0, phase)
+		mist += sky_fog * (0.85 if sky_event == 1 else 0.35)
 		mist_phase = mist
 		var fog_d := 0.00055 + mist * 0.0018 + (1.0 - day) * 0.00035
-		env.fog_density = fog_d
-		# Cool blue night → warm dawn → clear day → amber dusk (1191 / 1192).
+		fog_d += sky_fog * 0.0028
+		if sky_event == 2:
+			fog_d += sky_intensity * 0.0011
+		# Swamp / wetland local mist near the player — peat air (Wave 4).
+		if player != null:
+			var bname: String = water_bio_name
+			if bname == "swamp" or bname == "wetland":
+				fog_d += 0.0009 + mist * 0.0006
+			elif bname == "meadow":
+				fog_d *= 0.88 # clearer meadow air
+			elif bname == "desert" or bname == "dune":
+				fog_d += 0.00025 # fine dust haze
+		# Carriage overhead: slight thermohydronic haze.
+		if player != null:
+			var cprox: float = 1.0 - clampf(absf(player.z - carriage_z) / CARRIAGE_PROX_M, 0.0, 1.0)
+			fog_d += cprox * day * 0.00035
+		env.fog_density = clampf(fog_d, 0.00035, 0.0042)
+		# Cool blue night → warm dawn → clear day → copper sunset → night.
 		var air_night := Color(0.07, 0.10, 0.18)
 		var air_dawn := Color(0.42, 0.48, 0.55)
 		var air_day := Color(0.16, 0.22, 0.28)
-		var air_dusk := Color(0.28, 0.18, 0.14)
+		var air_dusk := Color(0.38, 0.20, 0.12)
+		var air_sunset := Color(0.52, 0.22, 0.14)
 		var air: Color
 		if phase < 0.14:
 			air = air_night.lerp(air_dawn, smoothstep(0.02, 0.12, phase))
 		elif phase < 0.22:
 			air = air_dawn.lerp(air_day, smoothstep(0.14, 0.22, phase))
-		elif phase < 0.70:
+		elif phase < 0.68:
 			air = air_day
+		elif phase < 0.78:
+			air = air_day.lerp(air_sunset, smoothstep(0.68, 0.78, phase))
 		elif phase < 0.88:
-			air = air_day.lerp(air_dusk, smoothstep(0.70, 0.88, phase))
+			air = air_sunset.lerp(air_dusk, smoothstep(0.78, 0.88, phase))
 		else:
 			air = air_dusk.lerp(air_night, smoothstep(0.88, 1.0, phase))
+		# Fog banks bleach warm air; storms cool it.
+		if sky_event == 1:
+			air = air.lerp(Color(0.55, 0.60, 0.68), sky_fog * 0.55)
+		elif sky_event == 2:
+			air = air.lerp(Color(0.12, 0.14, 0.18), sky_intensity * 0.45)
 		env.background_color = air
 		env.fog_light_color = air
 		env.ambient_light_color = air.lightened(0.12)
-		env.ambient_light_energy = 0.22 + 0.38 * day + mist * 0.08
-		env.fog_light_energy = 0.85 + 0.35 * day
-		# Far-side settlement glow as dusk deepens (1192).
-		env.glow_intensity = 0.22 + (1.0 - day) * 0.45
-		env.glow_bloom = 0.04 + (1.0 - day) * 0.12
-		env.tonemap_exposure = 0.78 + 0.18 * day
+		env.ambient_light_energy = 0.22 + 0.38 * day + mist * 0.08 - sky_intensity * 0.06
+		env.fog_light_energy = 0.85 + 0.35 * day + sky_fog * 0.25
+		# Far-side settlement glow as dusk deepens (1192) — peak at sunset hour.
+		var sunset_peak: float = 0.0
+		if phase > 0.68 and phase < 0.92:
+			sunset_peak = smoothstep(0.70, 0.80, phase) * (1.0 - smoothstep(0.84, 0.94, phase))
+		env.glow_intensity = 0.28 + (1.0 - day) * 0.50 + sunset_peak * 0.55
+		env.glow_bloom = 0.05 + (1.0 - day) * 0.14 + sunset_peak * 0.12
+		env.tonemap_exposure = 0.80 + 0.20 * day - sky_intensity * 0.08 + sunset_peak * 0.06
 
-	if axis_mat:
-		var warm := Color(1.0, 0.94, 0.80).lerp(Color(1.0, 0.55, 0.32), 1.0 - day)
-		if band == "dusk":
-			warm = warm.lerp(Color(1.0, 0.72, 0.45), 0.55)
-		axis_mat.emission = warm
-		axis_mat.emission_energy_multiplier = 0.35 + 1.5 * day + (0.8 if band == "dusk" else 0.0)
-		# Slow emission pulse — real fusion-lit strips have regulation ripple.
-		# The eye reads a perfectly constant light as artificial in a bad way.
-		var pulse: float = 1.0 + sin(clock * TAU / 120.0) * 0.05
-		axis_mat.emission_energy_multiplier *= pulse
-		axis_mat.albedo_color = warm
-	if dust and player:
+	# Cloud deck thickens in fog / storms; warm tint already from rama_day.
+	if cloud_node and cloud_node.material_override and Engine.get_process_frames() % 4 == 0:
+		var cover: float = 0.55 + sky_fog * 0.22 + (sky_intensity * 0.28 if sky_event == 2 else 0.0)
+		cloud_node.material_override.set_shader_parameter("cover", clampf(cover, 0.35, 0.92))
+
+	if dust and player and Engine.get_process_frames() % 2 == 0:
 		dust.global_position = player.feet_pos()
 		# Gentle drift along the drum axis — air moves, and motes that are
 		# perfectly still read as stuck.
-		var drift := Vector3(0, 0, sin(clock * 0.23) * 0.3) + Vector3(sin(clock * 0.41) * 0.15, cos(clock * 0.37) * 0.1, 0)
+		var drift := Vector3(0, 0, sin(clock * 0.23) * 0.45) \
+				+ Vector3(sin(clock * 0.41) * 0.22, cos(clock * 0.37) * 0.14, 0)
 		dust.global_position += drift
+		# Don't fight apply_view survey modes — only hide motes in thick fog
+		# while the colonist cam is up.
+		if post_layer == null or post_layer.visible:
+			dust.visible = sky_event != 1 or sky_fog < 0.55
+	if insects and player:
+		var show_bugs := (post_layer == null or post_layer.visible) \
+				and sky_event != 2 and sky_fog < 0.7
+		insects.visible = show_bugs
+		_insect_accum += dt
+		if show_bugs and _insect_accum >= 0.10:
+			_insect_accum = 0.0
+			var feet: Vector3 = player.feet_pos()
+			var up := Vector3(-feet.x, -feet.y, 0.0).normalized()
+			var tang := up.cross(Vector3(0, 0, 1)).normalized()
+			if tang.length_squared() < 0.01:
+				tang = up.cross(Vector3(1, 0, 0)).normalized()
+			var axial := tang.cross(up).normalized()
+			const INSECT_N := 28
+			if insects.multimesh.instance_count != INSECT_N:
+				insects.multimesh.instance_count = INSECT_N
+				for i in INSECT_N:
+					var warm: float = float(i % 5) / 5.0
+					insects.multimesh.set_instance_color(i, Color(
+							0.42 + warm * 0.28, 0.34 + warm * 0.18, 0.16 + warm * 0.08, 0.28))
+			for i in INSECT_N:
+				var ph: float = float(i) * 1.7 + clock * (0.9 + float(i % 4) * 0.15)
+				var rad: float = 2.5 + float(i % 7) * 0.85
+				var loft: float = 0.8 + 0.55 * sin(ph * 1.3) + float(i % 5) * 0.35
+				var pos: Vector3 = feet + tang * cos(ph) * rad + axial * sin(ph * 1.15) * rad \
+						+ up * loft
+				var xf := Transform3D(Basis.IDENTITY, pos)
+				var s: float = 0.7 + float(i % 3) * 0.25
+				xf.basis = xf.basis.scaled(Vector3(s, s, s))
+				insects.multimesh.set_instance_transform(i, xf)
 
 	# Steam off wet ground when the strip comes up (1195).
 	if steam_life > 0.0 and steam_mm and player:
 		steam_life -= dt
 		steam_mm.visible = true
 		var base: Vector3 = player.feet_pos()
-		var up := Vector3(-base.x, -base.y, 0.0).normalized()
+		var steam_up := Vector3(-base.x, -base.y, 0.0).normalized()
 		var wdep: float = terrain.water_depth_at(player.theta, player.z)
-		var a := 0.12 + 0.25 * clampf(steam_life / 4.5, 0.0, 1.0) * (0.4 + wdep)
+		var a := 0.14 + 0.30 * clampf(steam_life / 4.5, 0.0, 1.0) * (0.4 + wdep)
+		var steam_x: Array[Transform3D] = []
+		var steam_c: Array[Color] = []
+		steam_x.resize(16)
+		steam_c.resize(16)
 		for i in 16:
 			var ang: float = float(i) / 16.0 * TAU + clock * 0.4
 			var lateral := Vector3(cos(ang), sin(ang), sin(ang * 1.7) * 0.3)
-			lateral = (lateral - up * lateral.dot(up)).normalized()
+			lateral = (lateral - steam_up * lateral.dot(steam_up)).normalized()
 			var loft: float = 0.4 + float(i % 5) * 0.35 + (4.5 - steam_life) * 0.15
-			var xf := Transform3D(Basis.IDENTITY, base + lateral * (1.2 + i * 0.35) + up * loft)
+			var xf := Transform3D(Basis.IDENTITY, base + lateral * (1.2 + i * 0.35) + steam_up * loft)
 			var s: float = 0.6 + (i % 3) * 0.25
 			xf.basis = xf.basis.scaled(Vector3(s, s * 1.3, s))
-			steam_mm.multimesh.set_instance_transform(i, xf)
-			steam_mm.multimesh.set_instance_color(i, Color(0.85, 0.88, 0.92, a))
+			steam_x[i] = xf
+			steam_c[i] = Color(0.85, 0.88, 0.92, a)
+		steam_mm.multimesh.instance_count = 16
+		for i in 16:
+			steam_mm.multimesh.set_instance_transform(i, steam_x[i])
+			steam_mm.multimesh.set_instance_color(i, steam_c[i])
 	elif steam_mm:
 		steam_mm.visible = false
 
@@ -2474,8 +4430,17 @@ func _build_panels() -> void:
 func _refresh_soil_overlay() -> void:
 	if soil_overlay == null or terrain == null:
 		return
-	var img := Image.create_from_data(128, 128, false, Image.FORMAT_RGB8,
-			terrain.soil_map(128, 128, soil_mode))
+	var raw: PackedByteArray = terrain.soil_map(128, 128, soil_mode)
+	# Colour-blind remap (§2106) + optional isolines (§2100).
+	var img := Image.create(128, 128, false, Image.FORMAT_RGB8)
+	for y in 128:
+		for x in 128:
+			var i: int = (y * 128 + x) * 3
+			var c: Color = RamaControls.remap_overlay_rgb(
+					raw[i] / 255.0, raw[i + 1] / 255.0, raw[i + 2] / 255.0)
+			img.set_pixel(x, y, c)
+	if RamaControls.overlay_contours:
+		_draw_overlay_contours(img, raw)
 	soil_overlay.texture = ImageTexture.create_from_image(img)
 	var names := ["org·N·wet", "organic", "nitrogen", "moisture"]
 	var chip_cols := [
@@ -2487,7 +4452,26 @@ func _refresh_soil_overlay() -> void:
 	if soil_chip:
 		soil_chip.color = chip_cols[soil_mode]
 	if soil_chip_label:
-		soil_chip_label.text = "soil · %s  (V)" % names[soil_mode]
+		var pal: String = RamaControls.overlay_palette
+		var tag: String = "" if pal == "default" else (" · " + pal.left(4))
+		soil_chip_label.text = "soil · %s%s  (N)" % [names[soil_mode], tag]
+
+func _draw_overlay_contours(img: Image, raw: PackedByteArray) -> void:
+	## Isolines on the primary channel — cheapest legibility win (§2100).
+	var w := 128
+	var h := 128
+	var levels := [64, 128, 192]
+	for y in range(1, h - 1):
+		for x in range(1, w - 1):
+			var i: int = (y * w + x) * 3
+			var v: int = raw[i] if soil_mode != 3 else raw[i + 2]
+			var vx: int = raw[i + 3] if soil_mode != 3 else raw[i + 5]
+			var vy: int = raw[i + w * 3] if soil_mode != 3 else raw[i + w * 3 + 2]
+			for L in levels:
+				if (v < L and vx >= L) or (v >= L and vx < L) \
+						or (v < L and vy >= L) or (v >= L and vy < L):
+					img.set_pixel(x, y, Color(0.95, 0.95, 0.90, 1.0))
+					break
 
 func cycle_soil_mode() -> void:
 	soil_mode = (soil_mode + 1) % 4
@@ -2584,6 +4568,83 @@ func home_bearing() -> String:
 		t += "\n" + bearing_to(waypoint, "mark")
 	return t
 
+## Transient one-line feedback, shown by the HUD toast component.
+var toast := ""
+var toast_t := 0.0
+
+func note(t: String) -> void:
+	toast = t
+	toast_t = 3.0
+
+func toggle_fast_day() -> void:
+	day_speed = 1.0 if day_speed > 1.05 else FAST_DAY_MULT
+	_apply_day_speed(true)
+
+func _apply_day_speed(announce: bool) -> void:
+	var pace: float = 1.0 if day_speed <= 1.05 else sqrt(day_speed) * 1.35
+	if terrain != null and terrain.has_method("set_spectacle_pace"):
+		terrain.set_spectacle_pace(pace)
+	if announce:
+		if day_speed > 1.05:
+			note("fast day — full cycle ~%ds · F6 off" % int(DAY_LENGTH / day_speed))
+			print("[rama] fast-day ON ×%.0f (spectacle pace %.1f)" % [day_speed, pace])
+		else:
+			note("day cycle normal")
+			print("[rama] fast-day OFF")
+
+## Smooth sky-event state from sim; toast on sudden fog / rain storm.
+func _poll_sky_weather(dt: float) -> void:
+	if terrain == null or not terrain.has_method("spine_status"):
+		return
+	_sky_poll_accum += dt
+	if _sky_poll_accum >= 0.12:
+		_sky_poll_accum = 0.0
+		var st: Dictionary = terrain.spine_status()
+		if bool(st.get("ok", false)):
+			var ev: int = int(st.get("sky_event", 0))
+			_sky_inten_target = float(st.get("sky_intensity", 0.0))
+			_sky_fog_target = float(st.get("fog_factor", 0.0))
+			if ev != last_sky_event:
+				if ev == 1:
+					note("fog bank rolling in")
+					print("[rama] sky — fog bank")
+					steam_life = maxf(steam_life, 3.2)
+				elif ev == 2:
+					note("rain storm")
+					print("[rama] sky — rain storm")
+					life_refresh_accum = 1.0
+				elif last_sky_event == 1:
+					note("fog lifting")
+				elif last_sky_event == 2:
+					note("storm passing")
+				last_sky_event = ev
+			sky_event = ev
+	# Lerp every frame so fog/storm onset stays smooth between FFI polls.
+	var k: float = clampf(dt * 3.2, 0.0, 1.0)
+	sky_intensity = lerpf(sky_intensity, _sky_inten_target, k)
+	sky_fog = lerpf(sky_fog, _sky_fog_target, k)
+
+func playtest_mark(kind: String) -> void:
+	if not playtest:
+		return
+	var now: int = Time.get_ticks_msec() - playtest_t0_ms
+	match kind:
+		"lookup":
+			if playtest_lookup_ms < 0:
+				playtest_lookup_ms = now
+		"walk":
+			if playtest_walk_ms < 0:
+				playtest_walk_ms = now
+		"dig":
+			if playtest_dig_ms < 0:
+				playtest_dig_ms = now
+	if playtest_lookup_ms >= 0 and playtest_walk_ms >= 0 and playtest_dig_ms >= 0:
+		var row := "playtest,lookup_ms=%d,walk_ms=%d,dig_ms=%d" % [
+				playtest_lookup_ms, playtest_walk_ms, playtest_dig_ms]
+		print("[rama] ", row)
+		DisplayServer.clipboard_set(row)
+		playtest = false  # one row
+
 func _tick_panels() -> void:
 	if mini_cam == null or player == null:
 		return
@@ -2605,12 +4666,47 @@ func _tick_panels() -> void:
 	if frame % 3 == 0 and mini_vp:
 		mini_vp.render_target_update_mode = SubViewport.UPDATE_ONCE
 	# The panels are for playing, not for the full-screen instruments.
-	if hud_panels: hud_panels.visible = (player.view == 0)
+	if hud_panels:
+		var panels_on: bool = (player.view == 0) and not RamaControls.photo_mode
+		if RamaControls.hud_density == "off":
+			panels_on = false
+		hud_panels.visible = panels_on
+	if reticle:
+		reticle.visible = (player.view == 0) and not RamaControls.photo_mode
+	_apply_reduced_motion()
+
+func _apply_reduced_motion() -> void:
+	## Reduced-motion: kill sway amplitudes (§2107). Only rewrite uniforms when
+	## the preference flips — plant layers × every frame was pure busywork.
+	var want: int = 1 if RamaControls.reduced_motion else 0
+	if want == _reduced_motion_applied:
+		return
+	_reduced_motion_applied = want
+	var sway: float = 0.0 if want == 1 else 0.22
+	var tree_sway: float = 0.0 if want == 1 else 0.055
+	if grass_mm and grass_mm.material_override is ShaderMaterial:
+		(grass_mm.material_override as ShaderMaterial).set_shader_parameter("sway", sway)
+	var layers: Array = []
+	layers.append_array(plant_species_near)
+	layers.append_array(plant_species_mid)
+	layers.append(plant_mm_far)
+	for mi in layers:
+		if mi and mi.material_override is ShaderMaterial:
+			(mi.material_override as ShaderMaterial).set_shader_parameter("sway", tree_sway)
+
 
 # ------------------------------------------------------------- screenshots --
 
 func _take_shots() -> void:
-	await RenderingServer.frame_post_draw
+	# Headless uses the dummy renderer — no real viewport texture. Skip rather
+	# than hang forever on frame_post_draw (LANDSCAPE_3200 verify note).
+	if DisplayServer.get_name() == "headless":
+		print("[rama] --shot SKIP under headless (dummy renderer has no viewport)")
+		get_tree().quit()
+		return
+	await get_tree().process_frame
+	RenderingServer.force_draw()
+	await get_tree().process_frame
 	var shots := [
 		{"name": "01_wake", "pitch": -0.05, "yaw": 0.0, "h": 0.6},
 		{"name": "02_stand", "pitch": 0.02, "yaw": 0.0, "h": 1.72},
@@ -2621,13 +4717,102 @@ func _take_shots() -> void:
 		{"name": "07_level", "pitch": -0.52, "yaw": 2.5, "h": 1.72, "level": true},
 		{"name": "08_drum", "pitch": 0.0, "yaw": 0.75, "h": 1.72, "view": 1},
 		{"name": "09_map", "pitch": 0.0, "yaw": 0.0, "h": 1.72, "view": 2},
+		{"name": "13_across", "pitch": 0.30, "yaw": 0.0, "h": 1.72, "vantage": true},
+		# Places, after the colony has had time to grow into them. These two
+		# are the whole point of the dwelling layer: a township that filled up
+		# and a delve that never could.
+		{"name": "10_township", "pitch": 0.0, "h": 1.72, "dwell": 2, "soak": true, "standoff": 34.0},
+		{"name": "11_delve", "pitch": 0.0, "h": 1.72, "dwell": 0, "standoff": 26.0},
+		# Same township, instruments on — this one is the HUD check.
+		{"name": "12_place", "pitch": 0.0, "h": 1.72, "dwell": 2, "standoff": 34.0, "hud": true},
 	]
 	for s in shots:
+		if s.get("soak", false):
+			# Let people actually arrive before photographing where they live.
+			for i in 24:
+				terrain.sim_tick(5.0)
+			refresh_dwellings()
+		if s.get("vantage", false):
+			# The longest sightline the habitat has — the view that exposed
+			# every distance cut-off. Keep it as a regression shot.
+			player.theta = 3.063
+			player.z = 2724.0
+			player.r = ground_at(player.theta, player.z)
+			player.vr = 0.0
+			player.yaw = PI
+			terrain.set_player_pos(player.theta, player.z)
+			player._update_camera()
+			_queue_chunks()
+			_pump_chunks(400)
+			refresh_mid(true)
+			refresh_grass()
+		# These are photographs of a place, not of an interface.
+		RamaControls.photo_mode = s.has("dwell") and not s.get("hud", false)
+		if s.has("dwell"):
+			var want: int = int(s["dwell"])
+			var db: PackedFloat32Array = terrain.dwellings_lod()
+			var best := -1
+			var best_score := -1.0
+			for i in int(db.size() / 9.0):
+				if int(db[i * 9 + 2]) != want:
+					continue
+				var score: float = db[i * 9 + 3] + db[i * 9 + 4]
+				if score > best_score:
+					best_score = score
+					best = i
+			if best < 0:
+				print("[rama] no dwelling of kind %d to shoot" % want)
+				continue
+			# Stand DOWNHILL of the place and aim at it. A fixed axial offset
+			# with a hand-tuned pitch buries the camera in the first hillside
+			# it meets — and a delve is by definition on a hillside.
+			var sth: float = db[best * 9]
+			var szz: float = db[best * 9 + 1]
+			var sgr: float = ground_at(sth, szz)
+			var standoff: float = float(s.get("standoff", 26.0))
+			var bth: float = sth
+			var bzz: float = szz - standoff
+			var blow: float = -1.0
+			for k in 12:
+				var a: float = float(k) / 12.0 * TAU
+				var cth: float = sth + cos(a) * standoff / P["radius"]
+				var czz: float = szz + sin(a) * standoff
+				# Larger radius is nearer the hull, i.e. LOWER ground.
+				var cg: float = ground_at(cth, czz)
+				if cg > blow:
+					blow = cg
+					bth = cth
+					bzz = czz
+			player.theta = bth
+			player.z = bzz
+			player.r = ground_at(bth, bzz)
+			player.vr = 0.0
+			terrain.set_player_pos(player.theta, player.z)
+			# _pump_chunks only drains the queue — the queue itself is built
+			# around wherever the player was. Re-queue first, or the near mesh
+			# never follows and everything looks like it is floating over the
+			# far field.
+			player._update_camera()
+			_queue_chunks()
+			_pump_chunks(400)
+			refresh_grass()
+			refresh_mid(true)
+			refresh_dwellings()
+			# Aim the camera at the place instead of guessing a pitch.
+			var eye_p: Vector3 = to_world(player.theta, player.z, player.r - float(s["h"]))
+			var tgt_p: Vector3 = to_world(sth, szz, sgr - 2.0)
+			var dir: Vector3 = (tgt_p - eye_p).normalized()
+			var up_v: Vector3 = up_at(eye_p)
+			var tan_v := Vector3(-sin(player.theta), cos(player.theta), 0.0)
+			player.yaw = atan2(dir.dot(tan_v), dir.z)
+			player.pitch = asin(clampf(dir.dot(up_v), -1.0, 1.0))
+			s["pitch"] = player.pitch
+			s["yaw"] = player.yaw
 		player.view = int(s.get("view", 0))
 		apply_view(player.view)
 		player.cam_ready = false
 		player.pitch = s["pitch"]
-		player.yaw = s["yaw"]
+		player.yaw = float(s.get("yaw", player.yaw))
 		player.eye = s["h"]
 		player._update_camera()
 		if s.get("level", false):
@@ -2659,6 +4844,22 @@ func _take_shots() -> void:
 		await RenderingServer.frame_post_draw
 		await RenderingServer.frame_post_draw
 		var img := get_viewport().get_texture().get_image()
-		img.save_png("/Users/powerox/ramen/shots/%s.png" % s["name"])
+		var path := "/Users/powerox/ramen/shots/%s.png" % s["name"]
+		img.save_png(path)
+		# Screenshot metadata (§2120): seed, position, date beside the PNG.
+		var meta := {
+			"name": s["name"],
+			"seed": int(P.get("seed", 0)),
+			"theta": player.theta,
+			"z": player.z,
+			"pitch": player.pitch,
+			"yaw": player.yaw,
+			"clock": clock,
+			"date": Time.get_datetime_string_from_system(true),
+		}
+		var mf := FileAccess.open("/Users/powerox/ramen/shots/%s.json" % s["name"], FileAccess.WRITE)
+		if mf:
+			mf.store_string(JSON.stringify(meta))
+			mf.close()
 		print("[rama] shot ", s["name"])
 	get_tree().quit()

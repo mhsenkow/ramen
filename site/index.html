@@ -344,8 +344,9 @@
   <section id="download" aria-labelledby="download-title">
     <h2 class="section-title" id="download-title">Download</h2>
     <p class="section-copy">
-      Prebuilt builds for macOS, Linux, and Windows. First launch on macOS may need
-      right-click → Open. Requires a GPU that can run Godot 4 Forward+.
+      Prebuilt builds for macOS, Windows, Linux, Steam Deck, and low-spec Linux.
+      First launch on macOS may need right-click → Open. Requires a GPU that can
+      run Godot 4 Forward+ (Deck / low-spec defaults dial foliage and LOD down).
     </p>
     <div class="downloads" id="download-list">
       <div class="download">
@@ -357,6 +358,13 @@
       </div>
       <div class="download">
         <div>
+          <h3>Windows</h3>
+          <p id="win-status">Checking latest release…</p>
+        </div>
+        <a class="btn btn--ghost" id="dl-win" aria-disabled="true" href="#">Windows</a>
+      </div>
+      <div class="download">
+        <div>
           <h3>Linux</h3>
           <p id="linux-status">Checking latest release…</p>
         </div>
@@ -364,10 +372,17 @@
       </div>
       <div class="download">
         <div>
-          <h3>Windows</h3>
-          <p id="win-status">Checking latest release…</p>
+          <h3>Steam Deck</h3>
+          <p id="deck-status">Checking latest release…</p>
         </div>
-        <a class="btn btn--ghost" id="dl-win" aria-disabled="true" href="#">Windows</a>
+        <a class="btn btn--ghost" id="dl-deck" aria-disabled="true" href="#">Deck</a>
+      </div>
+      <div class="download">
+        <div>
+          <h3>Low Spec</h3>
+          <p id="low-status">Checking latest release…</p>
+        </div>
+        <a class="btn btn--ghost" id="dl-low" aria-disabled="true" href="#">Low Spec</a>
       </div>
     </div>
   </section>
@@ -399,6 +414,14 @@
         <img src="media/09_map.jpg" alt="Plan-view drainage map" loading="lazy" width="1600" height="900" />
         <figcaption>Drainage map</figcaption>
       </figure>
+      <figure>
+        <img src="media/10_township.jpg" alt="Township lights along the drum" loading="lazy" width="1600" height="900" />
+        <figcaption>Township</figcaption>
+      </figure>
+      <figure>
+        <img src="media/13_across.jpg" alt="Looking across the habitat" loading="lazy" width="1600" height="900" />
+        <figcaption>Across</figcaption>
+      </figure>
     </div>
   </section>
 
@@ -429,6 +452,8 @@
       <a href="https://github.com/mhsenkow/ramen">GitHub</a>
       ·
       <a href="https://github.com/mhsenkow/ramen/releases">Releases</a>
+      ·
+      <a href="./model-limits.html">Model limits</a>
     </span>
   </footer>
 
@@ -436,8 +461,10 @@
     const REPO = "mhsenkow/ramen";
     const ASSETS = {
       mac: { id: "dl-mac", status: "mac-status", match: /macos/i, label: "macOS build" },
-      linux: { id: "dl-linux", status: "linux-status", match: /linux/i, label: "Linux build" },
       win: { id: "dl-win", status: "win-status", match: /windows/i, label: "Windows build" },
+      linux: { id: "dl-linux", status: "linux-status", match: /linux/i, label: "Linux build" },
+      deck: { id: "dl-deck", status: "deck-status", match: /deck/i, label: "Steam Deck build" },
+      low: { id: "dl-low", status: "low-status", match: /lowspec/i, label: "Low Spec build" },
     };
 
     function wire(btn, statusEl, asset, tag) {

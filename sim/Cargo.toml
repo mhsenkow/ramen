@@ -8,6 +8,11 @@ crate-type = ["cdylib", "rlib"]
 
 [profile.release]
 opt-level = 3
+# The density field is the hot loop and it crosses module boundaries on every
+# sample (terrain -> noise -> edits). Whole-program inlining is worth the
+# longer link.
+lto = "fat"
+codegen-units = 1
 
 [dependencies]
 godot = "0.4"

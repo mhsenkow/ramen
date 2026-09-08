@@ -17,20 +17,48 @@ pub struct Phys {
     pub bulking: f32,
 }
 
-pub const PHYS: [Phys; 8] = [
-    Phys { bulk_kg_m3: 1600.0, bulking: 1.20 }, // regolith
-    Phys { bulk_kg_m3: 1500.0, bulking: 1.18 }, // sediment
-    Phys { bulk_kg_m3: 1800.0, bulking: 1.22 }, // clay
-    Phys { bulk_kg_m3: 2300.0, bulking: 1.25 }, // sandstone
-    Phys { bulk_kg_m3: 3000.0, bulking: 1.30 }, // basalt
-    Phys { bulk_kg_m3: 3500.0, bulking: 1.28 }, // ferrous ore
-    Phys { bulk_kg_m3: 917.0,  bulking: 1.05 }, // ice
-    Phys { bulk_kg_m3: 7800.0, bulking: 1.00 }, // structural alloy
+pub const PHYS: [Phys; 9] = [
+    Phys {
+        bulk_kg_m3: 1600.0,
+        bulking: 1.20,
+    }, // regolith
+    Phys {
+        bulk_kg_m3: 1500.0,
+        bulking: 1.18,
+    }, // sediment
+    Phys {
+        bulk_kg_m3: 1800.0,
+        bulking: 1.22,
+    }, // clay
+    Phys {
+        bulk_kg_m3: 2300.0,
+        bulking: 1.25,
+    }, // sandstone
+    Phys {
+        bulk_kg_m3: 3000.0,
+        bulking: 1.30,
+    }, // basalt
+    Phys {
+        bulk_kg_m3: 3500.0,
+        bulking: 1.28,
+    }, // ferrous ore
+    Phys {
+        bulk_kg_m3: 917.0,
+        bulking: 1.05,
+    }, // ice
+    Phys {
+        bulk_kg_m3: 7800.0,
+        bulking: 1.00,
+    }, // structural alloy
+    Phys {
+        bulk_kg_m3: 1550.0,
+        bulking: 1.15,
+    }, // sand
 ];
 
 #[inline]
 pub fn phys(id: u8) -> Phys {
-    PHYS[(id as usize).min(7)]
+    PHYS[(id as usize).min(PHYS.len() - 1)]
 }
 
 /// Continuous ore grade 0..1 from vein-core distance (item 806–807).
@@ -46,7 +74,13 @@ pub fn ore_grade(t: &Terrain, p: [f32; 3]) -> f32 {
     }
     let s = 0.018;
     let v1 = fbm3(p[0] * s, p[1] * s, p[2] * s, 4, t.hab.seed ^ 0x0E01);
-    let v2 = fbm3(p[0] * s + 17.0, p[1] * s - 9.0, p[2] * s + 3.0, 4, t.hab.seed ^ 0x0E02);
+    let v2 = fbm3(
+        p[0] * s + 17.0,
+        p[1] * s - 9.0,
+        p[2] * s + 3.0,
+        4,
+        t.hab.seed ^ 0x0E02,
+    );
     let vein = ((v1 - 0.5).abs()).max((v2 - 0.5).abs());
     let near_tunnel = t.near_tunnel(p, 14.0);
     let thresh = if near_tunnel { 0.045 } else { 0.028 };
@@ -141,9 +175,9 @@ pub fn integrate_dig_yield(t: &Terrain, stroke: &Stroke) -> DigYield {
     let step = (stroke.radius * 0.28).clamp(0.40, 0.85);
     let cell = step * step * step;
     let n = ((reach / step).ceil() as i32).max(2);
-    let mut grade_acc = [0.0f32; 8];
-    let mut grade_w = [0.0f32; 8];
-    let mut vol = [0.0f32; 8];
+    let mut grade_acc = [0.0f32; 9];
+    let mut grade_w = [0.0f32; 9];
+    let mut vol = [0.0f32; 9];
 
     for iz in -n..=n {
         for iy in -n..=n {
@@ -163,17 +197,18 @@ pub fn integrate_dig_yield(t: &Terrain, stroke: &Stroke) -> DigYield {
                 if mat == mid::ALLOY {
                     continue; // undiggable — density may still read solid near hull
                 }
-                vol[mat as usize] += cell;
+                let mi = (mat as usize).min(8);
+                vol[mi] += cell;
                 if mat == mid::FERROUS {
                     let g = ore_grade(t, p);
-                    grade_acc[mat as usize] += g * cell;
-                    grade_w[mat as usize] += cell;
+                    grade_acc[mi] += g * cell;
+                    grade_w[mi] += cell;
                 }
             }
         }
     }
 
-    for id in 0u8..8 {
+    for id in 0u8..9 {
         let v = vol[id as usize];
         if v <= 1e-8 {
             continue;
@@ -307,30 +342,102 @@ pub fn material_id_by_name(name: &str) -> Option<u8> {
 
 pub fn bio_phys(id: u8) -> Phys {
     match id {
-        bio_id::GREEN => Phys { bulk_kg_m3: 400.0, bulking: 1.0 },
-        bio_id::WOOD => Phys { bulk_kg_m3: 650.0, bulking: 1.0 },
-        bio_id::FIBRE => Phys { bulk_kg_m3: 300.0, bulking: 1.4 },
-        bio_id::SEED => Phys { bulk_kg_m3: 550.0, bulking: 1.0 },
-        bio_id::WATER => Phys { bulk_kg_m3: 1000.0, bulking: 1.0 },
-        craft_id::CHARCOAL => Phys { bulk_kg_m3: 250.0, bulking: 1.1 },
-        craft_id::CERAMIC => Phys { bulk_kg_m3: 2000.0, bulking: 1.0 },
-        craft_id::GLASS => Phys { bulk_kg_m3: 2500.0, bulking: 1.0 },
-        craft_id::IRON => Phys { bulk_kg_m3: 7800.0, bulking: 1.0 },
-        craft_id::SLAG => Phys { bulk_kg_m3: 1600.0, bulking: 1.2 },
-        craft_id::ASH => Phys { bulk_kg_m3: 600.0, bulking: 1.3 },
-        craft_id::LIME => Phys { bulk_kg_m3: 1200.0, bulking: 1.15 },
-        craft_id::GRAVEL => Phys { bulk_kg_m3: 1600.0, bulking: 1.2 },
-        craft_id::DUST => Phys { bulk_kg_m3: 1100.0, bulking: 1.4 },
-        craft_id::SAND => Phys { bulk_kg_m3: 1600.0, bulking: 1.15 },
-        craft_id::MANURE => Phys { bulk_kg_m3: 500.0, bulking: 1.2 },
-        craft_id::BONE_MEAL => Phys { bulk_kg_m3: 900.0, bulking: 1.1 },
-        craft_id::FLOUR => Phys { bulk_kg_m3: 600.0, bulking: 1.2 },
-        craft_id::OIL => Phys { bulk_kg_m3: 920.0, bulking: 1.0 },
-        craft_id::BROTH => Phys { bulk_kg_m3: 1000.0, bulking: 1.0 },
-        craft_id::NOODLES => Phys { bulk_kg_m3: 700.0, bulking: 1.1 },
-        craft_id::TARE => Phys { bulk_kg_m3: 1100.0, bulking: 1.0 },
-        craft_id::RAMEN => Phys { bulk_kg_m3: 950.0, bulking: 1.0 },
-        craft_id::RICH_RAMEN => Phys { bulk_kg_m3: 950.0, bulking: 1.0 },
+        bio_id::GREEN => Phys {
+            bulk_kg_m3: 400.0,
+            bulking: 1.0,
+        },
+        bio_id::WOOD => Phys {
+            bulk_kg_m3: 650.0,
+            bulking: 1.0,
+        },
+        bio_id::FIBRE => Phys {
+            bulk_kg_m3: 300.0,
+            bulking: 1.4,
+        },
+        bio_id::SEED => Phys {
+            bulk_kg_m3: 550.0,
+            bulking: 1.0,
+        },
+        bio_id::WATER => Phys {
+            bulk_kg_m3: 1000.0,
+            bulking: 1.0,
+        },
+        craft_id::CHARCOAL => Phys {
+            bulk_kg_m3: 250.0,
+            bulking: 1.1,
+        },
+        craft_id::CERAMIC => Phys {
+            bulk_kg_m3: 2000.0,
+            bulking: 1.0,
+        },
+        craft_id::GLASS => Phys {
+            bulk_kg_m3: 2500.0,
+            bulking: 1.0,
+        },
+        craft_id::IRON => Phys {
+            bulk_kg_m3: 7800.0,
+            bulking: 1.0,
+        },
+        craft_id::SLAG => Phys {
+            bulk_kg_m3: 1600.0,
+            bulking: 1.2,
+        },
+        craft_id::ASH => Phys {
+            bulk_kg_m3: 600.0,
+            bulking: 1.3,
+        },
+        craft_id::LIME => Phys {
+            bulk_kg_m3: 1200.0,
+            bulking: 1.15,
+        },
+        craft_id::GRAVEL => Phys {
+            bulk_kg_m3: 1600.0,
+            bulking: 1.2,
+        },
+        craft_id::DUST => Phys {
+            bulk_kg_m3: 1100.0,
+            bulking: 1.4,
+        },
+        craft_id::SAND => Phys {
+            bulk_kg_m3: 1600.0,
+            bulking: 1.15,
+        },
+        craft_id::MANURE => Phys {
+            bulk_kg_m3: 500.0,
+            bulking: 1.2,
+        },
+        craft_id::BONE_MEAL => Phys {
+            bulk_kg_m3: 900.0,
+            bulking: 1.1,
+        },
+        craft_id::FLOUR => Phys {
+            bulk_kg_m3: 600.0,
+            bulking: 1.2,
+        },
+        craft_id::OIL => Phys {
+            bulk_kg_m3: 920.0,
+            bulking: 1.0,
+        },
+        craft_id::BROTH => Phys {
+            bulk_kg_m3: 1000.0,
+            bulking: 1.0,
+        },
+        craft_id::NOODLES => Phys {
+            bulk_kg_m3: 700.0,
+            bulking: 1.1,
+        },
+        craft_id::TARE => Phys {
+            bulk_kg_m3: 1100.0,
+            bulking: 1.0,
+        },
+        craft_id::RAMEN => Phys {
+            bulk_kg_m3: 950.0,
+            bulking: 1.0,
+        },
+        craft_id::RICH_RAMEN => Phys {
+            bulk_kg_m3: 950.0,
+            bulking: 1.0,
+        },
         _ => phys(id),
     }
 }
@@ -556,6 +663,71 @@ impl Stockpile {
     }
 }
 
+/// Take from the nearest heap into the pack, up to whatever room is left.
+///
+/// Without this, dropping or spilling is one-way: mass stays in the ledger as
+/// "heaps" but leaves play permanently, which a closed system cannot afford.
+/// Returns (material_id, mass taken) when something moved.
+pub fn take_from_heap(
+    heaps: &mut Vec<Stockpile>,
+    inv: &mut Inventory,
+    hab_radius: f32,
+    theta: f32,
+    z: f32,
+    reach: f32,
+) -> Option<(u8, f32)> {
+    let room_mass = (inv.max_mass_kg - inv.mass_kg()).max(0.0);
+    let room_vol = (inv.max_volume_m3 - inv.volume_m3()).max(0.0);
+    if room_mass < 0.05 || room_vol < 1e-5 {
+        return None;
+    }
+
+    // Nearest heap within reach, measured along the surface.
+    let mut best: Option<(usize, f32)> = None;
+    for (i, h) in heaps.iter().enumerate() {
+        let dth = {
+            let x = (h.theta - theta).rem_euclid(std::f32::consts::TAU);
+            let x = x.min(std::f32::consts::TAU - x);
+            x * hab_radius
+        };
+        let dz = h.z - z;
+        let d2 = dth * dth + dz * dz;
+        if d2 <= reach * reach && best.map_or(true, |(_, b)| d2 < b) {
+            best = Some((i, d2));
+        }
+    }
+    let (idx, _) = best?;
+
+    let h = &mut heaps[idx];
+    if h.mass_kg <= 1e-4 {
+        heaps.remove(idx);
+        return None;
+    }
+    // Take the largest share that fits BOTH limits, keeping the heap's own
+    // mass-to-volume ratio so density stays consistent.
+    let by_mass = (room_mass / h.mass_kg).min(1.0);
+    let by_vol = if h.loose_m3 > 1e-6 {
+        (room_vol / h.loose_m3).min(1.0)
+    } else {
+        1.0
+    };
+    let frac = by_mass.min(by_vol).clamp(0.0, 1.0);
+    let take_m = h.mass_kg * frac;
+    let take_v = h.loose_m3 * frac;
+    if take_m < 0.02 {
+        return None;
+    }
+    let mid = h.material_id;
+    let grade = h.grade;
+    h.mass_kg -= take_m;
+    h.loose_m3 -= take_v;
+    if h.mass_kg <= 0.02 {
+        heaps.remove(idx);
+    }
+    inv.add_stack(mid, take_m, take_v, grade);
+    Some((mid, take_m))
+}
+
 /// Merge spill into a nearby same-material heap, or push a new one.
 /// Rapid dig with a full pack used to spawn one sphere per bite.
 pub fn deposit_heap(
@@ -758,10 +930,19 @@ pub const RECIPES: &[Recipe] = &[
         time_s: 8.0,
         o2_kg: 0.0,
         co2_kg: 0.0,
-        inputs: &[RecipeIO { material: "sandstone", mass_kg: 10.0 }],
+        inputs: &[RecipeIO {
+            material: "sandstone",
+            mass_kg: 10.0,
+        }],
         outputs: &[
-            RecipeIO { material: "gravel", mass_kg: 9.4 },
-            RecipeIO { material: "dust", mass_kg: 0.6 },
+            RecipeIO {
+                material: "gravel",
+                mass_kg: 9.4,
+            },
+            RecipeIO {
+                material: "dust",
+                mass_kg: 0.6,
+            },
         ],
     },
     Recipe {
@@ -771,10 +952,19 @@ pub const RECIPES: &[Recipe] = &[
         time_s: 10.0,
         o2_kg: 0.0,
         co2_kg: 0.0,
-        inputs: &[RecipeIO { material: "gravel", mass_kg: 8.0 }],
+        inputs: &[RecipeIO {
+            material: "gravel",
+            mass_kg: 8.0,
+        }],
         outputs: &[
-            RecipeIO { material: "sand", mass_kg: 7.5 },
-            RecipeIO { material: "dust", mass_kg: 0.5 },
+            RecipeIO {
+                material: "sand",
+                mass_kg: 7.5,
+            },
+            RecipeIO {
+                material: "dust",
+                mass_kg: 0.5,
+            },
         ],
     },
     Recipe {
@@ -784,10 +974,19 @@ pub const RECIPES: &[Recipe] = &[
         time_s: 90.0,
         o2_kg: 1.2,
         co2_kg: 2.8,
-        inputs: &[RecipeIO { material: "timber", mass_kg: 10.0 }],
+        inputs: &[RecipeIO {
+            material: "timber",
+            mass_kg: 10.0,
+        }],
         outputs: &[
-            RecipeIO { material: "charcoal", mass_kg: 2.5 },
-            RecipeIO { material: "gas_loss", mass_kg: 7.5 },
+            RecipeIO {
+                material: "charcoal",
+                mass_kg: 2.5,
+            },
+            RecipeIO {
+                material: "gas_loss",
+                mass_kg: 7.5,
+            },
         ],
     },
     Recipe {
@@ -798,13 +997,28 @@ pub const RECIPES: &[Recipe] = &[
         o2_kg: 2.5,
         co2_kg: 3.4,
         inputs: &[
-            RecipeIO { material: "clay", mass_kg: 8.0 },
-            RecipeIO { material: "charcoal", mass_kg: 1.5 },
+            RecipeIO {
+                material: "clay",
+                mass_kg: 8.0,
+            },
+            RecipeIO {
+                material: "charcoal",
+                mass_kg: 1.5,
+            },
         ],
         outputs: &[
-            RecipeIO { material: "ceramic", mass_kg: 7.2 },
-            RecipeIO { material: "ash", mass_kg: 0.4 },
-            RecipeIO { material: "gas_loss", mass_kg: 1.9 },
+            RecipeIO {
+                material: "ceramic",
+                mass_kg: 7.2,
+            },
+            RecipeIO {
+                material: "ash",
+                mass_kg: 0.4,
+            },
+            RecipeIO {
+                material: "gas_loss",
+                mass_kg: 1.9,
+            },
         ],
     },
     Recipe {
@@ -815,13 +1029,28 @@ pub const RECIPES: &[Recipe] = &[
         o2_kg: 8.0,
         co2_kg: 11.0,
         inputs: &[
-            RecipeIO { material: "ferrous ore", mass_kg: 20.0 },
-            RecipeIO { material: "charcoal", mass_kg: 5.0 },
+            RecipeIO {
+                material: "ferrous ore",
+                mass_kg: 20.0,
+            },
+            RecipeIO {
+                material: "charcoal",
+                mass_kg: 5.0,
+            },
         ],
         outputs: &[
-            RecipeIO { material: "iron", mass_kg: 8.0 },
-            RecipeIO { material: "slag", mass_kg: 12.5 },
-            RecipeIO { material: "gas_loss", mass_kg: 4.5 },
+            RecipeIO {
+                material: "iron",
+                mass_kg: 8.0,
+            },
+            RecipeIO {
+                material: "slag",
+                mass_kg: 12.5,
+            },
+            RecipeIO {
+                material: "gas_loss",
+                mass_kg: 4.5,
+            },
         ],
     },
     Recipe {
@@ -832,12 +1061,24 @@ pub const RECIPES: &[Recipe] = &[
         o2_kg: 3.0,
         co2_kg: 5.5,
         inputs: &[
-            RecipeIO { material: "sediment", mass_kg: 10.0 },
-            RecipeIO { material: "charcoal", mass_kg: 2.0 },
+            RecipeIO {
+                material: "sediment",
+                mass_kg: 10.0,
+            },
+            RecipeIO {
+                material: "charcoal",
+                mass_kg: 2.0,
+            },
         ],
         outputs: &[
-            RecipeIO { material: "lime", mass_kg: 5.6 },
-            RecipeIO { material: "gas_loss", mass_kg: 6.4 },
+            RecipeIO {
+                material: "lime",
+                mass_kg: 5.6,
+            },
+            RecipeIO {
+                material: "gas_loss",
+                mass_kg: 6.4,
+            },
         ],
     },
     Recipe {
@@ -848,14 +1089,32 @@ pub const RECIPES: &[Recipe] = &[
         o2_kg: 4.0,
         co2_kg: 5.5,
         inputs: &[
-            RecipeIO { material: "sand", mass_kg: 8.0 },
-            RecipeIO { material: "lime", mass_kg: 1.5 },
-            RecipeIO { material: "charcoal", mass_kg: 2.0 },
+            RecipeIO {
+                material: "sand",
+                mass_kg: 8.0,
+            },
+            RecipeIO {
+                material: "lime",
+                mass_kg: 1.5,
+            },
+            RecipeIO {
+                material: "charcoal",
+                mass_kg: 2.0,
+            },
         ],
         outputs: &[
-            RecipeIO { material: "glass", mass_kg: 8.8 },
-            RecipeIO { material: "ash", mass_kg: 0.5 },
-            RecipeIO { material: "gas_loss", mass_kg: 2.2 },
+            RecipeIO {
+                material: "glass",
+                mass_kg: 8.8,
+            },
+            RecipeIO {
+                material: "ash",
+                mass_kg: 0.5,
+            },
+            RecipeIO {
+                material: "gas_loss",
+                mass_kg: 2.2,
+            },
         ],
     },
     Recipe {
@@ -865,10 +1124,19 @@ pub const RECIPES: &[Recipe] = &[
         time_s: 30.0,
         o2_kg: 0.4,
         co2_kg: 0.55,
-        inputs: &[RecipeIO { material: "greens", mass_kg: 5.0 }],
+        inputs: &[RecipeIO {
+            material: "greens",
+            mass_kg: 5.0,
+        }],
         outputs: &[
-            RecipeIO { material: "manure", mass_kg: 3.8 },
-            RecipeIO { material: "gas_loss", mass_kg: 1.2 },
+            RecipeIO {
+                material: "manure",
+                mass_kg: 3.8,
+            },
+            RecipeIO {
+                material: "gas_loss",
+                mass_kg: 1.2,
+            },
         ],
     },
     Recipe {
@@ -879,10 +1147,19 @@ pub const RECIPES: &[Recipe] = &[
         o2_kg: 0.0,
         co2_kg: 0.0,
         inputs: &[
-            RecipeIO { material: "seed", mass_kg: 2.0 },
-            RecipeIO { material: "ash", mass_kg: 1.0 },
+            RecipeIO {
+                material: "seed",
+                mass_kg: 2.0,
+            },
+            RecipeIO {
+                material: "ash",
+                mass_kg: 1.0,
+            },
         ],
-        outputs: &[RecipeIO { material: "bone meal", mass_kg: 3.0 }],
+        outputs: &[RecipeIO {
+            material: "bone meal",
+            mass_kg: 3.0,
+        }],
     },
     // --- Cooking / ramen (garden → bowl) ---
     Recipe {
@@ -892,10 +1169,19 @@ pub const RECIPES: &[Recipe] = &[
         time_s: 20.0,
         o2_kg: 0.0,
         co2_kg: 0.0,
-        inputs: &[RecipeIO { material: "seed", mass_kg: 4.0 }],
+        inputs: &[RecipeIO {
+            material: "seed",
+            mass_kg: 4.0,
+        }],
         outputs: &[
-            RecipeIO { material: "flour", mass_kg: 3.6 },
-            RecipeIO { material: "dust", mass_kg: 0.4 },
+            RecipeIO {
+                material: "flour",
+                mass_kg: 3.6,
+            },
+            RecipeIO {
+                material: "dust",
+                mass_kg: 0.4,
+            },
         ],
     },
     Recipe {
@@ -905,10 +1191,19 @@ pub const RECIPES: &[Recipe] = &[
         time_s: 25.0,
         o2_kg: 0.0,
         co2_kg: 0.0,
-        inputs: &[RecipeIO { material: "seed", mass_kg: 5.0 }],
+        inputs: &[RecipeIO {
+            material: "seed",
+            mass_kg: 5.0,
+        }],
         outputs: &[
-            RecipeIO { material: "oil", mass_kg: 1.5 },
-            RecipeIO { material: "manure", mass_kg: 3.5 }, // press cake → feed/compost
+            RecipeIO {
+                material: "oil",
+                mass_kg: 1.5,
+            },
+            RecipeIO {
+                material: "manure",
+                mass_kg: 3.5,
+            }, // press cake → feed/compost
         ],
     },
     Recipe {
@@ -919,12 +1214,24 @@ pub const RECIPES: &[Recipe] = &[
         o2_kg: 0.3,
         co2_kg: 0.4,
         inputs: &[
-            RecipeIO { material: "greens", mass_kg: 3.0 },
-            RecipeIO { material: "bone meal", mass_kg: 1.0 },
+            RecipeIO {
+                material: "greens",
+                mass_kg: 3.0,
+            },
+            RecipeIO {
+                material: "bone meal",
+                mass_kg: 1.0,
+            },
         ],
         outputs: &[
-            RecipeIO { material: "broth", mass_kg: 3.5 },
-            RecipeIO { material: "gas_loss", mass_kg: 0.5 },
+            RecipeIO {
+                material: "broth",
+                mass_kg: 3.5,
+            },
+            RecipeIO {
+                material: "gas_loss",
+                mass_kg: 0.5,
+            },
         ],
     },
     Recipe {
@@ -935,10 +1242,19 @@ pub const RECIPES: &[Recipe] = &[
         o2_kg: 0.0,
         co2_kg: 0.0,
         inputs: &[
-            RecipeIO { material: "flour", mass_kg: 3.0 },
-            RecipeIO { material: "oil", mass_kg: 0.2 },
+            RecipeIO {
+                material: "flour",
+                mass_kg: 3.0,
+            },
+            RecipeIO {
+                material: "oil",
+                mass_kg: 0.2,
+            },
         ],
-        outputs: &[RecipeIO { material: "noodles", mass_kg: 3.2 }],
+        outputs: &[RecipeIO {
+            material: "noodles",
+            mass_kg: 3.2,
+        }],
     },
     Recipe {
         id: "reduce_tare",
@@ -948,12 +1264,24 @@ pub const RECIPES: &[Recipe] = &[
         o2_kg: 0.2,
         co2_kg: 0.25,
         inputs: &[
-            RecipeIO { material: "greens", mass_kg: 2.0 },
-            RecipeIO { material: "ash", mass_kg: 0.3 },
+            RecipeIO {
+                material: "greens",
+                mass_kg: 2.0,
+            },
+            RecipeIO {
+                material: "ash",
+                mass_kg: 0.3,
+            },
         ],
         outputs: &[
-            RecipeIO { material: "tare", mass_kg: 1.8 },
-            RecipeIO { material: "gas_loss", mass_kg: 0.5 },
+            RecipeIO {
+                material: "tare",
+                mass_kg: 1.8,
+            },
+            RecipeIO {
+                material: "gas_loss",
+                mass_kg: 0.5,
+            },
         ],
     },
     Recipe {
@@ -964,11 +1292,23 @@ pub const RECIPES: &[Recipe] = &[
         o2_kg: 0.1,
         co2_kg: 0.1,
         inputs: &[
-            RecipeIO { material: "noodles", mass_kg: 1.5 },
-            RecipeIO { material: "broth", mass_kg: 2.0 },
-            RecipeIO { material: "greens", mass_kg: 0.5 },
+            RecipeIO {
+                material: "noodles",
+                mass_kg: 1.5,
+            },
+            RecipeIO {
+                material: "broth",
+                mass_kg: 2.0,
+            },
+            RecipeIO {
+                material: "greens",
+                mass_kg: 0.5,
+            },
         ],
-        outputs: &[RecipeIO { material: "ramen", mass_kg: 4.0 }],
+        outputs: &[RecipeIO {
+            material: "ramen",
+            mass_kg: 4.0,
+        }],
     },
     Recipe {
         id: "bowl_rich_ramen",
@@ -978,13 +1318,31 @@ pub const RECIPES: &[Recipe] = &[
         o2_kg: 0.15,
         co2_kg: 0.15,
         inputs: &[
-            RecipeIO { material: "noodles", mass_kg: 1.5 },
-            RecipeIO { material: "broth", mass_kg: 2.0 },
-            RecipeIO { material: "greens", mass_kg: 0.8 },
-            RecipeIO { material: "oil", mass_kg: 0.3 },
-            RecipeIO { material: "tare", mass_kg: 0.4 },
+            RecipeIO {
+                material: "noodles",
+                mass_kg: 1.5,
+            },
+            RecipeIO {
+                material: "broth",
+                mass_kg: 2.0,
+            },
+            RecipeIO {
+                material: "greens",
+                mass_kg: 0.8,
+            },
+            RecipeIO {
+                material: "oil",
+                mass_kg: 0.3,
+            },
+            RecipeIO {
+                material: "tare",
+                mass_kg: 0.4,
+            },
         ],
-        outputs: &[RecipeIO { material: "rich ramen", mass_kg: 5.0 }],
+        outputs: &[RecipeIO {
+            material: "rich ramen",
+            mass_kg: 5.0,
+        }],
     },
 ];
 
@@ -1281,7 +1639,10 @@ mod tests {
             total_volume_m3: 0.05,
         };
         let frac = inv.try_add(&y);
-        assert!(frac < 0.45, "should reject most of a 150 kg bite, frac={frac}");
+        assert!(
+            frac < 0.45,
+            "should reject most of a 150 kg bite, frac={frac}"
+        );
         assert!(inv.mass_kg() <= inv.max_mass_kg + 1e-3);
     }
 
@@ -1303,7 +1664,10 @@ mod tests {
         let empty = inv.encumbrance(9.81);
         inv.add_stack(mid::CLAY, 40.0, 0.035, 0.0);
         let full = inv.encumbrance(9.81);
-        assert!(full < empty * 0.85, "loaded {full} should be slower than {empty}");
+        assert!(
+            full < empty * 0.85,
+            "loaded {full} should be slower than {empty}"
+        );
     }
 
     #[test]
@@ -1354,14 +1718,44 @@ mod tests {
         inv.add_stack(bio_id::GREEN, 15.0, 0.04, 0.65);
         inv.add_stack(craft_id::ASH, 2.0, 0.005, 0.0);
         let mut atmo = Atmosphere::default();
-        let _ = craft(&mut inv, &mut atmo, recipe_by_id("mill_flour").unwrap(), 1.0);
+        let _ = craft(
+            &mut inv,
+            &mut atmo,
+            recipe_by_id("mill_flour").unwrap(),
+            1.0,
+        );
         let _ = craft(&mut inv, &mut atmo, recipe_by_id("press_oil").unwrap(), 0.5);
-        let _ = craft(&mut inv, &mut atmo, recipe_by_id("bone_meal_mix").unwrap(), 1.0);
-        let _ = craft(&mut inv, &mut atmo, recipe_by_id("simmer_broth").unwrap(), 1.0);
-        let _ = craft(&mut inv, &mut atmo, recipe_by_id("roll_noodles").unwrap(), 1.0);
-        let _ = craft(&mut inv, &mut atmo, recipe_by_id("reduce_tare").unwrap(), 0.5);
-        let bowl = craft(&mut inv, &mut atmo, recipe_by_id("bowl_rich_ramen").unwrap(), 0.5)
-            .expect("rich ramen");
+        let _ = craft(
+            &mut inv,
+            &mut atmo,
+            recipe_by_id("bone_meal_mix").unwrap(),
+            1.0,
+        );
+        let _ = craft(
+            &mut inv,
+            &mut atmo,
+            recipe_by_id("simmer_broth").unwrap(),
+            1.0,
+        );
+        let _ = craft(
+            &mut inv,
+            &mut atmo,
+            recipe_by_id("roll_noodles").unwrap(),
+            1.0,
+        );
+        let _ = craft(
+            &mut inv,
+            &mut atmo,
+            recipe_by_id("reduce_tare").unwrap(),
+            0.5,
+        );
+        let bowl = craft(
+            &mut inv,
+            &mut atmo,
+            recipe_by_id("bowl_rich_ramen").unwrap(),
+            0.5,
+        )
+        .expect("rich ramen");
         assert!(inv.mass_of(craft_id::RICH_RAMEN) + bowl.spilled.total_mass_kg > 2.0);
         let g = inv
             .stacks

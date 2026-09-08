@@ -4,19 +4,25 @@ shader_type canvas_item;
 // distant LOD hard — the blur hides it.
 
 uniform sampler2D screen_tex : hint_screen_texture, filter_linear_mipmap;
+// The sharp core used to be one fifth of the screen height (band 0.10) with
+// nearly two mip levels of blur outside it. In a drum that is the wrong shape:
+// there is no horizon line to sit the band on, the ground under your own feet
+// is at the bottom of the frame, and the inhabited far side is at the top. Both
+// of those were mush. Wider core, gentler ramp, less blur at the extremes —
+// still a diorama, but one you can read.
 uniform float focus_y = 0.55;
-uniform float band = 0.10;
-uniform float falloff = 0.34;
-uniform float max_blur = 2.2;
-uniform float vignette = 0.26;
-uniform float saturation = 0.93;
-uniform float contrast = 1.06;
-uniform float lift = 0.011;
-uniform float grain = 0.022;
-uniform float aberration = 0.9;
-uniform float barrel = 0.3;           // radial warp % at edges
-uniform float micro_contrast = 0.18;  // unsharp mask in focus band
-uniform float bloom_threshold = 1.05; // highlight bloom in bokeh
+uniform float band = 0.16;
+uniform float falloff = 0.42;
+uniform float max_blur = 1.25;
+uniform float vignette = 0.22;
+uniform float saturation = 0.96;
+uniform float contrast = 1.05;
+uniform float lift = 0.013;
+uniform float grain = 0.018;
+uniform float aberration = 0.75;
+uniform float barrel = 0.25;           // radial warp % at edges
+uniform float micro_contrast = 0.16;  // unsharp mask in focus band
+uniform float bloom_threshold = 1.0; // highlight bloom in bokeh
 
 float hash12(vec2 p) {
     vec3 p3 = fract(vec3(p.xyx) * 0.1031);

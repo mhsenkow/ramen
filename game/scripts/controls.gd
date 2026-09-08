@@ -5,7 +5,6 @@ extends RefCounted
 
 const CFG := "user://controls.cfg"
 
-# id, label, default key, default joypad button (or -1), joypad axis spec
 const ACTIONS := [
 	{"id": "forward",   "label": "Move forward",   "key": KEY_W,      "axis": [JOY_AXIS_LEFT_Y, -1.0]},
 	{"id": "back",      "label": "Move back",      "key": KEY_S,      "axis": [JOY_AXIS_LEFT_Y, 1.0]},
@@ -14,7 +13,7 @@ const ACTIONS := [
 	{"id": "jump",      "label": "Jump",           "key": KEY_SPACE,  "btn": JOY_BUTTON_A},
 	{"id": "run",       "label": "Run",            "key": KEY_SHIFT,  "btn": JOY_BUTTON_LEFT_STICK},
 	{"id": "dig",       "label": "Excavate",       "key": KEY_F,      "mouse": MOUSE_BUTTON_LEFT,  "axis": [JOY_AXIS_TRIGGER_RIGHT, 1.0]},
-	{"id": "place",     "label": "Install module", "key": KEY_G,      "mouse": MOUSE_BUTTON_RIGHT, "axis": [JOY_AXIS_TRIGGER_LEFT, 1.0]},
+	{"id": "place",     "label": "Install module", "key": KEY_G,      "axis": [JOY_AXIS_TRIGGER_LEFT, 1.0]},
 	{"id": "fill",      "label": "Add material",   "key": KEY_R,      "btn": JOY_BUTTON_X},
 	{"id": "undo",      "label": "Undo excavation","key": KEY_Z,      "btn": JOY_BUTTON_B},
 	{"id": "brush_up",  "label": "Brush larger",   "key": KEY_E,      "btn": JOY_BUTTON_RIGHT_SHOULDER},
@@ -25,34 +24,79 @@ const ACTIONS := [
 	{"id": "map_out",   "label": "Plan zoom out",  "key": KEY_MINUS,  "btn": JOY_BUTTON_DPAD_LEFT},
 	{"id": "view",      "label": "Switch view",    "key": KEY_TAB,    "btn": JOY_BUTTON_RIGHT_STICK},
 	{"id": "throw",     "label": "Throw object",   "key": KEY_T,      "btn": JOY_BUTTON_DPAD_DOWN},
-	{"id": "harvest",   "label": "Harvest plant",  "key": KEY_H,      "btn": JOY_BUTTON_DPAD_RIGHT},
-	{"id": "drop",      "label": "Drop pack",      "key": KEY_X,      "btn": JOY_BUTTON_DPAD_LEFT},
-	{"id": "craft",     "label": "Craft recipe",   "key": KEY_K,      "btn": -1},
-	{"id": "craft_prev","label": "Prev recipe",    "key": KEY_BRACKETLEFT, "btn": -1},
-	{"id": "craft_next","label": "Next recipe",    "key": KEY_BRACKETRIGHT, "btn": -1},
-	{"id": "amend",     "label": "Amend soil",     "key": KEY_M,      "btn": -1},
-	{"id": "scrub",     "label": "Toggle scrubber","key": KEY_U,      "btn": -1},
-	{"id": "eat",       "label": "Eat ramen",      "key": KEY_J,      "btn": -1},
-	{"id": "station",   "label": "Place station",  "key": KEY_Y,      "btn": -1},
-	{"id": "tilt",      "label": "Tilt-shift",     "key": KEY_P,      "btn": -1},
+	{"id": "harvest",   "label": "Harvest plant",  "key": KEY_H,      "btn": JOY_BUTTON_MISC1},
+	{"id": "drop",      "label": "Drop pack",      "key": KEY_X,      "btn": JOY_BUTTON_BACK},
+	{"id": "take",      "label": "Take from heap",  "key": KEY_L,      "btn": JOY_BUTTON_GUIDE},
+	{"id": "craft",     "label": "Craft recipe",   "key": KEY_K,      "btn": JOY_BUTTON_PADDLE1},
+	{"id": "craft_prev","label": "Prev recipe",    "key": KEY_BRACKETLEFT, "btn": JOY_BUTTON_PADDLE2},
+	{"id": "craft_next","label": "Next recipe",    "key": KEY_BRACKETRIGHT, "btn": JOY_BUTTON_PADDLE3},
+	{"id": "amend",     "label": "Amend soil",     "key": KEY_M,      "btn": JOY_BUTTON_PADDLE4},
+	{"id": "scrub",     "label": "Toggle scrubber","key": KEY_U,      "btn": JOY_BUTTON_TOUCHPAD},
+	{"id": "eat",       "label": "Eat ramen",      "key": KEY_J,      "btn": JOY_BUTTON_MISC1},
+	{"id": "station",   "label": "Place station",  "key": KEY_Y,      "btn": JOY_BUTTON_GUIDE},
+	{"id": "tilt",      "label": "Tilt-shift",     "key": KEY_P,      "btn": JOY_BUTTON_TOUCHPAD},
 	{"id": "pause",     "label": "Menu",           "key": KEY_ESCAPE, "btn": JOY_BUTTON_START},
-	{"id": "mod1",      "label": "Module 1",       "key": KEY_1,      "btn": -1},
-	{"id": "mod2",      "label": "Module 2",       "key": KEY_2,      "btn": -1},
-	{"id": "mod3",      "label": "Module 3",       "key": KEY_3,      "btn": -1},
-	{"id": "mod4",      "label": "Module 4",       "key": KEY_4,      "btn": -1},
-	{"id": "save",      "label": "Save digs",      "key": KEY_F5,     "btn": -1},
-	{"id": "load",      "label": "Load digs",      "key": KEY_F9,     "btn": -1},
-	{"id": "bottle",    "label": "Scoop / pour water", "key": KEY_V, "btn": -1},
-	{"id": "soil",      "label": "Soil overlay",   "key": KEY_N,      "btn": -1},
+	{"id": "mod1",      "label": "Module 1",       "key": KEY_4,      "btn": JOY_BUTTON_PADDLE1},
+	{"id": "mod2",      "label": "Module 2",       "key": KEY_5,      "btn": JOY_BUTTON_PADDLE2},
+	{"id": "mod3",      "label": "Module 3",       "key": KEY_6,      "btn": JOY_BUTTON_PADDLE3},
+	{"id": "mod4",      "label": "Module 4",       "key": KEY_7,      "btn": JOY_BUTTON_PADDLE4},
+	{"id": "speed1",    "label": "Speed gear 1",   "key": KEY_1,      "btn": -1},
+	{"id": "speed2",    "label": "Speed gear 2",   "key": KEY_2,      "btn": -1},
+	{"id": "speed3",    "label": "Speed gear 3",   "key": KEY_3,      "btn": -1},
+	{"id": "save",      "label": "Save digs",      "key": KEY_F5,     "btn": JOY_BUTTON_BACK},
+	{"id": "load",      "label": "Load digs",      "key": KEY_F9,     "btn": JOY_BUTTON_GUIDE},
+	{"id": "bottle",    "label": "Scoop / pour water", "key": KEY_V, "btn": JOY_BUTTON_MISC1},
+	{"id": "soil",      "label": "Soil overlay",   "key": KEY_N,      "btn": JOY_BUTTON_TOUCHPAD},
+	{"id": "photo",     "label": "Photo mode",     "key": KEY_F11,    "btn": JOY_BUTTON_MISC1},
+	{"id": "quiet",     "label": "Quiet mode",     "key": KEY_F10,    "btn": JOY_BUTTON_TOUCHPAD},
+	{"id": "fastday",   "label": "Fast day cycle", "key": KEY_F6,     "btn": -1},
+	{"id": "god",       "label": "God mode (fly)", "key": KEY_F1,     "btn": -1},
+	{"id": "body_prev", "label": "Previous build", "key": KEY_F2,     "btn": -1},
+	{"id": "body_next", "label": "Next build",     "key": KEY_F3,     "btn": -1},
+	{"id": "descend",   "label": "Descend / crouch","key": KEY_CTRL,  "btn": JOY_BUTTON_LEFT_SHOULDER},
 ]
 
 static var overrides := {}
 static var sensitivity := 0.0026
 static var invert_y := false
 static var fov := 62.0
+static var reduced_motion := false
+static var hud_density := "full"
+static var font_scale := 1.0
+static var photo_mode := false
+static var mute_on_focus_loss := true
+static var captions := true
+static var vol_world := 1.0
+static var vol_ui := 1.0
+static var vol_music := 0.7
+static var vol_voice := 1.0
+static var quality := "high"  # high | low | deck
+static var overlay_palette := "default"  # default | deuteranopia | protanopia | achroma
+static var overlay_contours := true
+static var archive_enabled := true  # content setting stub (PD §8)
+static var romance_intensity := "full"  # full | fade_to_black | off
+static var first_run_done := false
+## What right-click does while looking: fill dirt, or install the selected module.
+static var right_click := "fill"  # fill | place
+
+static var quiet_mode := false
+
+## The player's build. An archetype, optionally blended toward a second one,
+## then any individual axes moved by hand — the whole of `avatar/body.gd`'s
+## space is reachable and all three layers persist. `axes` wins over the blend
+## so a hand-set number stays where it was put.
+static var avatar := {
+	"archetype": "daddy",
+	"blend_to": "",
+	"blend": 0.0,
+	"axes": {},
+}
 
 static func act(id: String) -> String:
 	return "rama_" + id
+
+static func cfg_exists() -> bool:
+	return FileAccess.file_exists(CFG)
 
 static func install() -> void:
 	load_cfg()
@@ -69,6 +113,11 @@ static func install() -> void:
 			var m := InputEventMouseButton.new()
 			m.button_index = a["mouse"] as MouseButton
 			InputMap.action_add_event(name, m)
+		elif (a["id"] == "fill" and right_click == "fill") \
+				or (a["id"] == "place" and right_click == "place"):
+			var m := InputEventMouseButton.new()
+			m.button_index = MOUSE_BUTTON_RIGHT
+			InputMap.action_add_event(name, m)
 		if a.has("btn") and int(a["btn"]) >= 0:
 			var b := InputEventJoypadButton.new()
 			b.button_index = a["btn"] as JoyButton
@@ -78,6 +127,10 @@ static func install() -> void:
 			j.axis = a["axis"][0] as JoyAxis
 			j.axis_value = a["axis"][1]
 			InputMap.action_add_event(name, j)
+	# Runtime feature flags from export / CLI.
+	if OS.has_feature("deck") or OS.has_feature("lowspec"):
+		if quality == "high":
+			quality = "deck" if OS.has_feature("deck") else "low"
 
 static func rebind(id: String, keycode: int) -> void:
 	overrides[id] = keycode
@@ -91,6 +144,9 @@ static func binding_name(id: String) -> String:
 			var s := OS.get_keycode_string(k)
 			if a.has("mouse"):
 				s += "  /  " + ("Left click" if a["mouse"] == MOUSE_BUTTON_LEFT else "Right click")
+			elif (id == "fill" and right_click == "fill") \
+					or (id == "place" and right_click == "place"):
+				s += "  /  Right click"
 			return s
 	return "?"
 
@@ -101,12 +157,35 @@ static func save_cfg() -> void:
 	c.set_value("look", "sensitivity", sensitivity)
 	c.set_value("look", "invert_y", invert_y)
 	c.set_value("look", "fov", fov)
+	c.set_value("a11y", "reduced_motion", reduced_motion)
+	c.set_value("a11y", "hud_density", hud_density)
+	c.set_value("a11y", "font_scale", font_scale)
+	c.set_value("a11y", "mute_on_focus_loss", mute_on_focus_loss)
+	c.set_value("a11y", "captions", captions)
+	c.set_value("audio", "world", vol_world)
+	c.set_value("audio", "ui", vol_ui)
+	c.set_value("audio", "music", vol_music)
+	c.set_value("audio", "voice", vol_voice)
+	c.set_value("gfx", "quality", quality)
+	c.set_value("gfx", "overlay_palette", overlay_palette)
+	c.set_value("gfx", "overlay_contours", overlay_contours)
+	c.set_value("content", "archive_enabled", archive_enabled)
+	c.set_value("content", "romance_intensity", romance_intensity)
+	c.set_value("look", "right_click", right_click)
+	c.set_value("avatar", "archetype", avatar["archetype"])
+	c.set_value("avatar", "blend_to", avatar["blend_to"])
+	c.set_value("avatar", "blend", avatar["blend"])
+	c.set_value("avatar", "axes", avatar["axes"])
+	c.set_value("meta", "first_run_done", true)
 	c.save(CFG)
+	first_run_done = true
 
 static func load_cfg() -> void:
 	var c := ConfigFile.new()
 	if c.load(CFG) != OK:
+		first_run_done = false
 		return
+	first_run_done = bool(c.get_value("meta", "first_run_done", true))
 	overrides = {}
 	if c.has_section("keys"):
 		for id in c.get_section_keys("keys"):
@@ -114,11 +193,64 @@ static func load_cfg() -> void:
 	sensitivity = c.get_value("look", "sensitivity", sensitivity)
 	invert_y = c.get_value("look", "invert_y", invert_y)
 	fov = c.get_value("look", "fov", fov)
+	reduced_motion = c.get_value("a11y", "reduced_motion", reduced_motion)
+	hud_density = str(c.get_value("a11y", "hud_density", hud_density))
+	font_scale = float(c.get_value("a11y", "font_scale", font_scale))
+	mute_on_focus_loss = c.get_value("a11y", "mute_on_focus_loss", mute_on_focus_loss)
+	captions = c.get_value("a11y", "captions", captions)
+	vol_world = float(c.get_value("audio", "world", vol_world))
+	vol_ui = float(c.get_value("audio", "ui", vol_ui))
+	vol_music = float(c.get_value("audio", "music", vol_music))
+	vol_voice = float(c.get_value("audio", "voice", vol_voice))
+	quality = str(c.get_value("gfx", "quality", quality))
+	overlay_palette = str(c.get_value("gfx", "overlay_palette", overlay_palette))
+	overlay_contours = bool(c.get_value("gfx", "overlay_contours", overlay_contours))
+	archive_enabled = bool(c.get_value("content", "archive_enabled", archive_enabled))
+	romance_intensity = str(c.get_value("content", "romance_intensity", romance_intensity))
+	avatar = {
+		"archetype": str(c.get_value("avatar", "archetype", "daddy")),
+		"blend_to": str(c.get_value("avatar", "blend_to", "")),
+		"blend": float(c.get_value("avatar", "blend", 0.0)),
+		"axes": c.get_value("avatar", "axes", {}),
+	}
+	right_click = str(c.get_value("look", "right_click", right_click))
+	if right_click not in ["fill", "place"]:
+		right_click = "fill"
 
 static func reset() -> void:
+	avatar = {"archetype": "daddy", "blend_to": "", "blend": 0.0, "axes": {}}
 	overrides = {}
 	sensitivity = 0.0026
 	invert_y = false
 	fov = 62.0
+	reduced_motion = false
+	hud_density = "full"
+	font_scale = 1.0
+	mute_on_focus_loss = true
+	photo_mode = false
+	captions = true
+	vol_world = 1.0
+	vol_ui = 1.0
+	vol_music = 0.7
+	vol_voice = 1.0
+	quality = "high"
+	overlay_palette = "default"
+	overlay_contours = true
+	archive_enabled = true
+	romance_intensity = "full"
+	right_click = "fill"
 	install()
 	save_cfg()
+
+## Remap overlay RGB for colour-vision deficiency (§2106).
+static func remap_overlay_rgb(r: float, g: float, b: float) -> Color:
+	match overlay_palette:
+		"deuteranopia":
+			return Color(0.625 * r + 0.375 * g, 0.70 * r + 0.30 * g, b)
+		"protanopia":
+			return Color(0.567 * r + 0.433 * g, 0.558 * r + 0.442 * g, 0.242 * g + 0.758 * b)
+		"achroma":
+			var y := 0.299 * r + 0.587 * g + 0.114 * b
+			return Color(y, y, y)
+		_:
+			return Color(r, g, b)

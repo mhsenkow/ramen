@@ -1,5 +1,7 @@
 extends Node3D
 const RamaControls = preload("res://scripts/controls.gd")
+const RamaBody = preload("res://scripts/avatar/body.gd")
+const RamaGait = preload("res://scripts/avatar/gait.gd")
 ## Cylinder-aware third-person-ish controller.
 ##
 ## There is no world "up" here. Up is toward the axis and it rotates under you
@@ -16,9 +18,15 @@ var pitch := 0.0
 var eye := 1.72
 var on_ground := false
 var cam: Camera3D
+## Set by world before _ready, from the habitat's own diagonal.
+var cam_far := 5200.0
 var body: Node3D
 var rig := {}
+## Gait PHASE, in radians, one stride per turn. Advanced by distance travelled
+## (see `gait.advance`) — never by time, or the feet skate.
 var gait := 0.0
+var body_spec := {}
+var gait_spec := {}
 var cam_dist := 4.6
 var cam_target := Vector3.ZERO
 var cam_ready := false
@@ -35,10 +43,18 @@ var woke := false
 var fade: ColorRect
 var tilt_on := true
 var bottle_cd := 0.0
+var _step_hard := 1.0
+var _step_wet := 0.0
+## When true, colonist cam snaps orbit (no soft-follow lag on look).
+var _look_dirty := false
+var _enc_cache := 1.0
+var _enc_age := 99.0
 
-const WALK := 6.2
-const RUN := 11.5
 const JUMP := 6.4
+## Horizontal m/s by gear (1 stroll · 2 run · 3 cross-drum).
+const GEAR_WALK := [8.0, 22.0, 90.0]
+const GEAR_RUN := [14.0, 45.0, 220.0]
+const GOD_VERT := [28.0, 55.0, 120.0]
 var mouse_sens := 0.0026
 const ZOOM_MIN := 0.0
 const ZOOM_MAX := 7.5
@@ -51,39 +67,24 @@ var dig_cd := 0.0
 var throws: Array = []
 var trail: MeshInstance3D
 var trail_mesh: ImmediateMesh
+## Free-fly / noclip for surveying the drum. F1 toggles.
+var god_mode := false
+## 0/1/2 → keys 1/2/3. Gear 3 is for crossing the habitat fast.
+var speed_gear := 1
 
 func _ready() -> void:
 	cam = Camera3D.new()
 	cam.fov = RamaControls.fov
 	cam.near = 0.08
-	cam.far = 5200.0
+	cam.far = cam_far
 	add_child(cam)
 	cam.current = true
 
 	# An articulated colonist, so scale reads and motion has weight.
 	body = Node3D.new()
+	body.name = "Colonist"
 	world.add_child.call_deferred(body)
-	var skin := Color(0.76, 0.58, 0.44)
-	var jacket := Color(0.32, 0.38, 0.44)
-	var trousers := Color(0.22, 0.26, 0.32)
-	var boot := Color(0.20, 0.18, 0.17)
-	rig["hip"] = _part(body, Vector3(0.42, 0.22, 0.26), trousers, Vector3(0, 0.92, 0))
-	rig["torso"] = _part(rig["hip"], Vector3(0.46, 0.56, 0.28), jacket, Vector3(0, 0.38, 0))
-	rig["head"] = _part(rig["torso"], Vector3(0.26, 0.28, 0.26), skin, Vector3(0, 0.42, 0), true)
-	for side in [-1.0, 1.0]:
-		var key: String = "arm%d" % int(side)
-		var pivot := Node3D.new()
-		pivot.position = Vector3(side * 0.31, 0.22, 0)
-		rig["torso"].add_child(pivot)
-		rig[key] = pivot
-		_part(pivot, Vector3(0.15, 0.52, 0.16), skin, Vector3(0, -0.26, 0), true)
-		var lkey: String = "leg%d" % int(side)
-		var lp := Node3D.new()
-		lp.position = Vector3(side * 0.13, -0.10, 0)
-		rig["hip"].add_child(lp)
-		rig[lkey] = lp
-		_part(lp, Vector3(0.18, 0.66, 0.20), trousers, Vector3(0, -0.35, 0))
-		_part(lp, Vector3(0.20, 0.14, 0.30), boot, Vector3(0, -0.72, 0.04))
+	_rebuild_body()
 
 	trail_mesh = ImmediateMesh.new()
 	trail = MeshInstance3D.new()
@@ -119,25 +120,46 @@ func _ready() -> void:
 	_snap_to_ground()
 	_update_camera()
 
-func _part(parent: Node3D, size: Vector3, col: Color, pos: Vector3, is_skin := false) -> MeshInstance3D:
-	var mi := MeshInstance3D.new()
-	var bm := BoxMesh.new()
-	bm.size = size
-	mi.mesh = bm
-	var mat := StandardMaterial3D.new()
-	mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
-	mat.albedo_color = col
-	# Skin-tone parts get faint emission so they catch axis light even when
-	# the body is in its own AO. Real miniature figures always have a painted
-	# highlight.
-	if is_skin:
-		mat.emission_enabled = true
-		mat.emission = col.lightened(0.12)
-		mat.emission_energy_multiplier = 0.35
-	mi.material_override = mat
-	mi.position = pos
-	parent.add_child(mi)
-	return mi
+## Resolve the saved build and put it on the rig.
+##
+## Three layers, in order: an archetype, an optional blend toward a second one,
+## then any hand-set axes. So the character creator can be "pick one of eight",
+## "somewhere between these two", or "move this number", and they compose.
+func _rebuild_body() -> void:
+	var cfg: Dictionary = RamaControls.avatar
+	var spec: Dictionary = RamaBody.make(str(cfg.get("archetype", "daddy")))
+	var to: String = str(cfg.get("blend_to", ""))
+	var mix: float = clampf(float(cfg.get("blend", 0.0)), 0.0, 1.0)
+	if to != "" and mix > 0.001 and RamaBody.ARCHETYPES.has(to):
+		spec = RamaBody.blend(spec, RamaBody.make(to), mix)
+		gait_spec = RamaGait.blend(RamaGait.make(str(cfg["archetype"])),
+				RamaGait.make(to), mix)
+	else:
+		gait_spec = RamaGait.make(str(cfg.get("archetype", "daddy")))
+	var axes: Dictionary = cfg.get("axes", {})
+	if not axes.is_empty():
+		for k in axes:
+			spec[k] = axes[k]
+		# Hand-built bodies get a hand-built gait: derive one from the shape
+		# rather than keep walking like the archetype he no longer is.
+		gait_spec = RamaGait.blend(gait_spec, RamaGait.for_body(spec), 0.7)
+	body_spec = spec
+	rig = RamaBody.build(body, spec)
+	# Stand the camera in his own head, not at a constant 1.72.
+	eye = float(spec["stature"]) * 0.935
+
+## Cycle the build. The archetype list is a spectrum, not a menu, so stepping
+## through it is also the fastest way to see whether a gait reads.
+func cycle_body(dir: int) -> void:
+	var order: Array = RamaBody.ORDER
+	var i: int = order.find(str(RamaControls.avatar.get("archetype", "daddy")))
+	i = posmod(i + dir, order.size())
+	RamaControls.avatar["archetype"] = order[i]
+	RamaControls.avatar["blend_to"] = ""
+	RamaControls.avatar["axes"] = {}
+	_rebuild_body()
+	if world and world.has_method("note"):
+		world.note("build: %s" % str(order[i]).replace("_", " "))
 
 func _build_fade() -> void:
 	var cl := CanvasLayer.new()
@@ -173,13 +195,10 @@ func heading() -> Vector3:
 
 func _input(e: InputEvent) -> void:
 	if e is InputEventMouseButton and e.pressed and Input.mouse_mode == Input.MOUSE_MODE_CAPTURED:
-		if e.button_index == MOUSE_BUTTON_LEFT:
-			_edit(true)
-		elif e.button_index == MOUSE_BUTTON_RIGHT:
-			_build()
+		# Dig / fill / place come from InputMap (see controls.right_click).
 		# Trackpad scrolling arrives in bursts, so steps are small and the
 		# actual distance eases toward the target.
-		elif e.button_index == MOUSE_BUTTON_WHEEL_UP:
+		if e.button_index == MOUSE_BUTTON_WHEEL_UP:
 			cam_dist_target = clampf(cam_dist_target - 0.28, ZOOM_MIN, ZOOM_MAX)
 		elif e.button_index == MOUSE_BUTTON_WHEEL_DOWN:
 			cam_dist_target = clampf(cam_dist_target + 0.28, ZOOM_MIN, ZOOM_MAX)
@@ -193,6 +212,11 @@ func _input(e: InputEvent) -> void:
 		var iy: float = -1.0 if RamaControls.invert_y else 1.0
 		yaw -= e.relative.x * sens
 		pitch = clamp(pitch - e.relative.y * sens * iy, -1.45, 1.45)
+		# Apply look this frame — waiting for physics made turns feel frictional
+		# whenever the sim hitch'd, and soft cam follow compounded it.
+		_look_dirty = true
+		if view == 0 and woke:
+			_update_camera()
 	elif false and e is InputEventKey and e.pressed and not e.echo:
 		match e.keycode:
 			KEY_ESCAPE:
@@ -211,10 +235,13 @@ func _input(e: InputEvent) -> void:
 				view = (view + 1) % 3
 				cam_ready = false
 				world.apply_view(view)
-			KEY_1: module = 0
-			KEY_2: module = 1
-			KEY_3: module = 2
-			KEY_4: module = 3
+			KEY_1: speed_gear = 0; world.note("speed 1 — stroll")
+			KEY_2: speed_gear = 1; world.note("speed 2 — run")
+			KEY_3: speed_gear = 2; world.note("speed 3 — cross-drum")
+			KEY_4: module = 0
+			KEY_5: module = 1
+			KEY_6: module = 2
+			KEY_7: module = 3
 			KEY_F:
 				_edit(true)
 			KEY_G:
@@ -269,6 +296,8 @@ func _edit(remove: bool) -> void:
 		var pr: Dictionary = world.terrain.probe(p)
 		hard = float(pr.get("hardness", 1.0))
 		world.audio.dig(brush, hard)
+		if world.playtest:
+			world.playtest_mark("dig")
 
 func _build() -> void:
 	var hit: Dictionary = aim()
@@ -346,13 +375,21 @@ func _physics_process(dt: float) -> void:
 	if not woke:
 		wake_t += dt
 		# Waking up: eyes open on the ground, then you get to your feet.
-		var k: float = clamp(wake_t / 3.4, 0.0, 1.0)
-		eye = lerp(0.28, 1.72, ease(k, 0.4))
-		pitch = lerp(-0.30, 0.04, ease(k, 0.5))
-		if fade:
-			fade.color.a = clamp(1.0 - wake_t / 2.2, 0.0, 1.0)
-		if wake_t > 3.9:
+		# Reduced motion: snap awake instead of easing (§2107).
+		if RamaControls.reduced_motion:
+			eye = 1.72
+			pitch = 0.04
+			if fade:
+				fade.color.a = 0.0
 			woke = true
+		else:
+			var k: float = clamp(wake_t / 3.4, 0.0, 1.0)
+			eye = lerp(0.28, 1.72, ease(k, 0.4))
+			pitch = lerp(-0.30, 0.04, ease(k, 0.5))
+			if fade:
+				fade.color.a = clamp(1.0 - wake_t / 2.2, 0.0, 1.0)
+			if wake_t > 3.9:
+				woke = true
 		_snap_to_ground()
 		_update_camera()
 		_step_throws(dt)
@@ -367,10 +404,23 @@ func _physics_process(dt: float) -> void:
 	var fwd := -mv.y
 	var side := mv.x
 	var running: bool = Input.is_action_pressed(RamaControls.act("run"))
-	var inv: Dictionary = world.terrain.inventory()
-	var enc: float = float(inv.get("encumbrance", 1.0))
-	var speed: float = (RUN if running else WALK) * enc
+	_enc_age += dt
+	if _enc_age > 0.25 and world.terrain:
+		_enc_age = 0.0
+		var inv: Dictionary = world.terrain.inventory()
+		_enc_cache = float(inv.get("encumbrance", 1.0))
+	var enc: float = _enc_cache
+	var gix: int = clampi(speed_gear, 0, 2)
+	var speed: float
+	if god_mode:
+		speed = (GEAR_RUN[gix] if running else GEAR_WALK[gix])
+	else:
+		# Same gears on foot — gear 3 still flies you across the drum.
+		speed = (GEAR_RUN[gix] if running else GEAR_WALK[gix]) * enc
 	var jump_v: float = JUMP * sqrt(enc)
+	var old_theta := theta
+	var old_z := z
+	var old_ground: float = world.ground_at(theta, z)
 	if fwd != 0.0 or side != 0.0:
 		var mag := sqrt(fwd * fwd + side * side)
 		if mag > 1.0:
@@ -382,20 +432,60 @@ func _physics_process(dt: float) -> void:
 		var half: float = float(world.P["length"]) * 0.48
 		z = clamp(z + d_ax, -half, half)
 		theta = wrapf(theta + d_tg / max(r, 1.0), -PI, PI)
+		# Cliff bands: block steps taller than a scramble / slopes that read as wall
+		# (LANDSCAPE_4200 §BO 3387). Forces routing to cols instead of climbing faces.
+		if on_ground and not god_mode:
+			var g1: float = world.ground_at(theta, z)
+			var rise: float = g1 - old_ground
+			var run: float = maxf(sqrt(d_ax * d_ax + d_tg * d_tg), 0.05)
+			var blocked := rise > 1.35 or (rise > 0.55 and rise / run > 1.55)
+			if blocked:
+				# Try axial-only, then tangent-only — find the col sideways.
+				var z_try: float = clamp(old_z + d_ax, -half, half)
+				var th_try: float = wrapf(old_theta + d_tg / max(r, 1.0), -PI, PI)
+				var g_ax: float = world.ground_at(old_theta, z_try)
+				var g_tg: float = world.ground_at(th_try, old_z)
+				if g_ax - old_ground <= 1.15 and not ((g_ax - old_ground) > 0.55 and absf(d_ax) > 0.05 and (g_ax - old_ground) / absf(d_ax) > 1.55):
+					theta = old_theta
+					z = z_try
+				elif g_tg - old_ground <= 1.15 and not ((g_tg - old_ground) > 0.55 and absf(d_tg) > 0.05 and (g_tg - old_ground) / absf(d_tg) > 1.55):
+					theta = th_try
+					z = old_z
+				else:
+					theta = old_theta
+					z = old_z
 
-	# Radial motion: spin gravity pulls outward.
-	vr += g * dt
-	r += vr * dt
 	var ground: float = world.ground_at(theta, z)
-	if r >= ground:
-		r = ground
+	if god_mode:
+		# No spin gravity. Space = toward axis (up), Ctrl = outward (down).
 		vr = 0.0
-		on_ground = true
+		var up_in := 0.0
 		if Input.is_action_pressed(RamaControls.act("jump")):
-			vr = -jump_v
-			on_ground = false
+			up_in -= 1.0
+		if Input.is_action_pressed(RamaControls.act("descend")):
+			up_in += 1.0
+		r = clampf(r + up_in * GOD_VERT[gix] * dt, 40.0, float(world.P["radius"]) - 2.0)
+		on_ground = absf(r - ground) < 1.5
 	else:
-		on_ground = false
+		# Radial motion: spin gravity pulls outward.
+		vr += g * dt
+		r += vr * dt
+		# Airborne Coriolis — the can is spinning. Real miss is ~0.5 m; we
+		# push it so a hop lands a step spinward and you *feel* the drum.
+		if r < ground - 0.02:
+			var feel := 3.4
+			var d_arc: float = -2.0 * om * vr * feel * dt
+			theta = wrapf(theta + d_arc / max(r, 1.0), -PI, PI)
+			ground = world.ground_at(theta, z)
+		if r >= ground:
+			r = ground
+			vr = 0.0
+			on_ground = true
+			if Input.is_action_pressed(RamaControls.act("jump")):
+				vr = -jump_v
+				on_ground = false
+		else:
+			on_ground = false
 
 	_pad_look(dt)
 	_actions(dt)
@@ -404,19 +494,34 @@ func _physics_process(dt: float) -> void:
 		moved = speed
 	animate(dt, moved)
 	if world.audio:
-		world.audio.footstep(dt, moved if on_ground else 0.0)
+		var hard := 1.0
+		var wet := 0.0
+		if on_ground and Engine.get_physics_frames() % 10 == 0 and world.terrain:
+			var pr: Dictionary = world.terrain.probe(feet_pos())
+			hard = float(pr.get("hardness", 1.0))
+			wet = float(pr.get("moisture", 0.0))
+			_step_hard = hard
+			_step_wet = wet
+		else:
+			hard = _step_hard
+			wet = _step_wet
+		world.audio.footstep(dt, moved if on_ground else 0.0, hard, wet)
+	if world.playtest:
+		if pitch > 0.55:
+			world.playtest_mark("lookup")
+		if moved > 0.5:
+			world.playtest_mark("walk")
+
 	drum_spin += dt * 0.10
 	_update_camera()
 	_step_throws(dt)
 
-	# Aim raycast+probe every frame while digging; otherwise every other tick.
+	# Aim raycast+probe every frame while digging or filling; otherwise every other tick.
 	var digging: bool = Input.is_action_pressed(RamaControls.act("dig")) \
+			or Input.is_action_pressed(RamaControls.act("fill")) \
 			or Input.is_action_pressed(RamaControls.act("place"))
 	if digging or Engine.get_physics_frames() % 2 == 0:
 		_refresh_aim()
-
-	if Engine.get_process_frames() % 20 == 0:
-		world._queue_chunks()
 
 func _step_throws(dt: float) -> void:
 	var omega: float = world.P["omega"]
@@ -468,13 +573,19 @@ func _step_throws(dt: float) -> void:
 func _pad_look(dt: float) -> void:
 	var lx := Input.get_joy_axis(0, JOY_AXIS_RIGHT_X)
 	var ly := Input.get_joy_axis(0, JOY_AXIS_RIGHT_Y)
-	if absf(lx) < 0.16: lx = 0.0
-	if absf(ly) < 0.16: ly = 0.0
-	if lx == 0.0 and ly == 0.0:
+	# Soft deadzone + response curve so small stick noise isn't sticky friction.
+	var mag := sqrt(lx * lx + ly * ly)
+	var dead := 0.12
+	if mag < dead:
 		return
+	var t: float = (mag - dead) / (1.0 - dead)
+	t = t * t  # ease-in: fine aim near centre, faster at edge
+	lx = lx / mag * t
+	ly = ly / mag * t
 	var iy: float = -1.0 if RamaControls.invert_y else 1.0
 	yaw -= lx * pad_sens * dt
 	pitch = clamp(pitch - ly * pad_sens * dt * iy, -1.45, 1.45)
+	_look_dirty = true
 
 ## One place where every binding is consulted, so keyboard, mouse and gamepad
 ## all take the same path.
@@ -485,14 +596,29 @@ func _actions(dt: float) -> void:
 		return
 	if world.menu and world.menu.visible:
 		return
+	if Input.is_action_just_pressed(A.act("god")):
+		god_mode = not god_mode
+		vr = 0.0
+		if god_mode:
+			world.note("god mode — 1/2/3 speed · Shift sprint · Space/Ctrl up/down · F1 off")
+		else:
+			world.note("god mode off")
+			_snap_to_ground()
+	if Input.is_action_just_pressed(A.act("speed1")):
+		speed_gear = 0
+		world.note("speed 1 — stroll")
+	elif Input.is_action_just_pressed(A.act("speed2")):
+		speed_gear = 1
+		world.note("speed 2 — run")
+	elif Input.is_action_just_pressed(A.act("speed3")):
+		speed_gear = 2
+		world.note("speed 3 — cross-drum")
 	if Input.is_action_just_pressed(A.act("view")):
 		view = (view + 1) % 3
 		cam_ready = false
 		world.apply_view(view)
 	if Input.is_action_just_pressed(A.act("undo")):
 		_undo()
-	if Input.is_action_just_pressed(A.act("fill")):
-		_edit(false)
 	if Input.is_action_just_pressed(A.act("place")):
 		_build()
 	if Input.is_action_just_pressed(A.act("level")):
@@ -507,6 +633,15 @@ func _actions(dt: float) -> void:
 				world.audio.place()
 	if Input.is_action_pressed(A.act("bottle")):
 		_bottle_water()
+	if Input.is_action_just_pressed(A.act("take")):
+		var tk: Dictionary = world.terrain.take_heap(theta, z, 3.5)
+		if tk.get("ok", false):
+			world.refresh_stockpiles()
+			world.note("+%.1f kg %s" % [float(tk["kg"]), tk["material"]])
+			if world.audio:
+				world.audio.place()
+		else:
+			world.note("nothing in reach, or pack full")
 	if Input.is_action_just_pressed(A.act("drop")):
 		var dy: Dictionary = world.terrain.drop_inventory(theta, z)
 		if dy.get("ok", false):
@@ -526,9 +661,9 @@ func _actions(dt: float) -> void:
 		if bool(rec.get("needs_station", false)) and not bool(rec.get("station_near", true)):
 			print("[rama] need %s station nearby" % str(rec.get("station", "?")))
 		else:
-			var scale: float = float(rec.get("max_scale", 0.0))
-			if scale >= 0.05:
-				var cr: Dictionary = world.terrain.craft(recipe_idx, scale, theta, z)
+			var craft_scale: float = float(rec.get("max_scale", 0.0))
+			if craft_scale >= 0.05:
+				var cr: Dictionary = world.terrain.craft(recipe_idx, craft_scale, theta, z)
 				if cr.get("ok", false):
 					world.refresh_stockpiles()
 					if world.audio:
@@ -587,6 +722,19 @@ func _actions(dt: float) -> void:
 		for c in world.get_children():
 			if c is CanvasLayer and c.layer == 1:
 				c.visible = tilt_on
+	if Input.is_action_just_pressed(A.act("body_next")):
+		cycle_body(1)
+	if Input.is_action_just_pressed(A.act("body_prev")):
+		cycle_body(-1)
+	if Input.is_action_just_pressed(A.act("photo")):
+		RamaControls.photo_mode = not RamaControls.photo_mode
+		world.note("photo mode" if RamaControls.photo_mode else "HUD back")
+	if Input.is_action_just_pressed(A.act("quiet")):
+		if world.audio and world.audio.has_method("set_quiet"):
+			world.audio.set_quiet(not RamaControls.quiet_mode)
+	if Input.is_action_just_pressed(A.act("fastday")):
+		if world.has_method("toggle_fast_day"):
+			world.toggle_fast_day()
 	if Input.is_action_just_pressed(A.act("waypoint")):
 		world.set_waypoint(theta, z)
 	if Input.is_action_just_pressed(A.act("save")):
@@ -609,11 +757,12 @@ func _actions(dt: float) -> void:
 	dig_cd -= dt
 	bottle_cd -= dt
 	var digging: bool = Input.is_action_pressed(A.act("dig"))
-	world.dig_held = digging
-	if digging and dig_cd <= 0.0:
+	var filling: bool = Input.is_action_pressed(A.act("fill"))
+	world.dig_held = digging or filling
+	if dig_cd <= 0.0 and (digging or filling):
 		# Back-pressure: if remesh is behind, bite slower instead of stacking hitch.
 		var backlog: int = world.remesh_backlog()
-		_edit(true)
+		_edit(not filling)
 		dig_cd = 0.28 if backlog >= 4 else (0.20 if backlog >= 2 else 0.16)
 
 func _refresh_aim() -> void:
@@ -625,7 +774,8 @@ func _refresh_aim() -> void:
 		can_dig = bool(pr.get("diggable", true))
 		last_aim["kind"] = pr.get("kind", "")
 	if highlight:
-		var show_brush: bool = hit.get("hit", false) and view == 0
+		var show_brush: bool = hit.get("hit", false) and view == 0 \
+			and not RamaControls.photo_mode
 		highlight.visible = show_brush
 		if show_brush:
 			# Show the brush's actual shape: a sphere, or the disc the
@@ -637,7 +787,8 @@ func _refresh_aim() -> void:
 			highlight.transform = Transform3D(Basis(rt, radial, ax), pt)
 			highlight.scale = Vector3(brush, 0.22 if level_brush else brush, brush)
 	if ghost:
-		var show_ghost: bool = hit.get("hit", false) and view == 0
+		var show_ghost: bool = hit.get("hit", false) and view == 0 \
+			and not RamaControls.photo_mode
 		ghost.visible = show_ghost
 		if show_ghost:
 			world.pose_ghost(ghost, hit["point"], module)
@@ -696,7 +847,7 @@ func _cam_colonist() -> void:
 	var true_up := right.cross(f).normalized()
 	var eye_pos := feet_pos() + u * eye
 
-	cam_dist = lerpf(cam_dist, cam_dist_target, 0.22)
+	cam_dist = lerpf(cam_dist, cam_dist_target, 1.0 if RamaControls.reduced_motion else 0.28)
 	var first_person: bool = cam_dist < 0.9
 	var want: Vector3 = eye_pos
 	if not first_person:
@@ -709,42 +860,32 @@ func _cam_colonist() -> void:
 			var k: float = (c_ground - 0.9) / maxf(c_r, 0.001)
 			want = Vector3(want.x * k, want.y * k, want.z)
 
-	# Smooth follow, so the camera has a little weight.
-	if not cam_ready:
+	# Soft follow only while walking. Looking snaps the orbit so turns aren't
+	# fighting a 0.28 lerp (that read as stick friction).
+	if not cam_ready or _look_dirty or RamaControls.reduced_motion or first_person:
 		cam_target = want
 		cam_ready = true
+		_look_dirty = false
 	else:
-		cam_target = cam_target.lerp(want, 0.28)
+		cam_target = cam_target.lerp(want, 0.42)
+	# Orientation always matches look — never lerp the basis.
 	cam.transform = Transform3D(Basis(right, true_up, -f), cam_target)
 
 	if body:
 		body.visible = not first_person
 		var bp := feet_pos()
 		var bf := heading()
-		var br := bf.cross(u).normalized()
-		body.transform = Transform3D(Basis(br, u, br.cross(u).normalized()), bp)
+		# +Z is the way he faces — the rig has a nose on it now, and the old
+		# basis was left-handed, so he walked backwards looking at you.
+		body.transform = Transform3D(
+				Basis(u.cross(bf).normalized(), u, bf), bp)
 
 ## Procedural walk cycle. Nothing is keyframed — the gait phase advances with
 ## distance travelled, so speed and animation cannot drift apart.
 func animate(dt: float, speed: float) -> void:
 	if rig.is_empty():
 		return
-	gait += speed * dt * 1.9
-	var moving: float = clampf(speed / 6.2, 0.0, 1.6)
-	var swing: float = sin(gait) * 0.62 * moving
-	var swing2: float = sin(gait + PI) * 0.62 * moving
-	rig["leg1"].rotation = Vector3(swing, 0, 0)
-	rig["leg-1"].rotation = Vector3(swing2, 0, 0)
-	rig["arm1"].rotation = Vector3(swing2 * 0.75, 0, 0)
-	rig["arm-1"].rotation = Vector3(swing * 0.75, 0, 0)
-	# Bob twice per stride, and lean into the run.
-	var bob: float = abs(sin(gait)) * 0.07 * moving
-	rig["hip"].position.y = 0.92 - bob
-	rig["torso"].rotation = Vector3(moving * 0.16, 0, 0)
-	# Head tilts toward the camera pitch, so the figure reads as looking
-	# where you look.
-	if rig.has("head"):
-		rig["head"].rotation.x = pitch * 0.3
-	# Idle breath when still.
-	if moving < 0.05:
-		rig["torso"].scale.y = 1.0 + sin(Time.get_ticks_msec() * 0.0018) * 0.012
+	gait = RamaGait.advance(gait, gait_spec, float(body_spec["stature"]), speed, dt)
+	gait = wrapf(gait, 0.0, TAU)
+	RamaGait.pose(rig, gait_spec, gait, speed,
+			float(Time.get_ticks_msec()) * 0.001, pitch)

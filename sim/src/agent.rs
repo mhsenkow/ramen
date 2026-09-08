@@ -3,14 +3,14 @@
 //! Rule (1401): agents act only through the same world operations the player
 //! uses. No agent-only affordances.
 
-use crate::chronicle::{Chronicle, EventKind, ACTOR_PLAYER};
-use crate::economy::{self, craft_id, bio_id, Inventory};
+use crate::chronicle::{Chronicle, EventKind};
+use crate::economy::{self, bio_id, craft_id, Inventory};
 use crate::habitat::Habitat;
 use crate::plant::PlantSim;
 use crate::soil::Soil;
 use crate::terrain::Terrain;
 
-pub const MAX_AGENTS_T0: usize = 12;
+pub const MAX_AGENTS_T0: usize = 16;
 
 #[derive(Clone, Copy, Debug)]
 pub struct Traits {
@@ -44,6 +44,7 @@ pub enum Goal {
     CraftFood,
     Eat,
     Rest,
+    GoHome,
     ApproachPlayer,
 }
 
@@ -121,9 +122,14 @@ impl AgentSim {
     }
 
     pub fn seed_farmers(&mut self, hab: &Habitat, elev: &[f32], n: usize) {
-        use crate::terrain::{NT, NZ, idx};
+        use crate::terrain::{idx, NT, NZ};
         let n = n.min(MAX_AGENTS_T0);
-        let names = ["Ren", "Jules", "Oren", "Sable", "Pax", "Idris"];
+        // Sixteen principals — the cast you can actually know. Followers are
+        // counted statistically by their dwelling, never named here.
+        let names = [
+            "Ren", "Jules", "Oren", "Sable", "Pax", "Idris", "Casimir", "Tobin", "Ash", "Nial",
+            "Emre", "Dov", "Lark", "Hale", "Wren", "Sol",
+        ];
         let mut rng = hab.seed ^ 0xA6E17;
         let mut placed = 0usize;
         let mut attempts = 0usize;
@@ -134,7 +140,7 @@ impl AgentSim {
             rng = rng.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
             let zi = ((rng >> 8) % NZ as u32) as usize;
             let e = elev[idx(ti, zi)];
-            if e < hab.water_level + 4.0 || e > hab.max_elevation * 0.55 {
+            if e < hab.water_level + 4.0 || e > hab.max_elevation * 0.78 {
                 continue;
             }
             let theta = ti as f32 / NT as f32 * std::f32::consts::TAU;
@@ -142,25 +148,39 @@ impl AgentSim {
             let name = names[placed % names.len()];
             let mut ag = Agent::farmer(placed as u32 + 1, name, theta, z, rng);
             // Trait differentiation (1512–1520): two farmers treat land differently.
-            match placed % 3 {
+            // Four ways to be, which `dwelling::kind_for` reads to decide how
+            // each of them chooses to live. Social is the axis that separates
+            // a town founder from a man who goes to ground.
+            match placed % 4 {
                 0 => {
-                    // Terracer — careful, patient.
+                    // Terracer — careful, patient, keeps to himself.
                     ag.traits.care = 0.9;
                     ag.traits.risk = 0.2;
                     ag.traits.patience = 0.85;
+                    ag.traits.social = 0.35;
                     ag.plot_radius = 40.0;
                 }
                 1 => {
-                    // Strip-miner energy — risky, impatient.
+                    // Strip-miner energy — risky, impatient, goes to ground.
                     ag.traits.care = 0.25;
-                    ag.traits.risk = 0.85;
+                    ag.traits.risk = 0.9;
                     ag.traits.patience = 0.3;
+                    ag.traits.social = 0.2;
                     ag.plot_radius = 55.0;
+                }
+                2 => {
+                    // Founder — gathers people, feeds them.
+                    ag.traits.care = 0.7;
+                    ag.traits.risk = 0.35;
+                    ag.traits.patience = 0.6;
+                    ag.traits.social = 0.9;
+                    ag.plot_radius = 65.0;
                 }
                 _ => {
                     ag.traits.care = 0.55;
                     ag.traits.risk = 0.45;
-                    ag.traits.social = 0.8;
+                    ag.traits.patience = 0.55;
+                    ag.traits.social = 0.6;
                 }
             }
             self.agents.push(ag);
@@ -238,13 +258,7 @@ impl AgentSim {
     }
 }
 
-fn choose_goal(
-    ag: &Agent,
-    light: f32,
-    player_theta: f32,
-    player_z: f32,
-    hab_r: f32,
-) -> Goal {
+fn choose_goal(ag: &Agent, light: f32, player_theta: f32, player_z: f32, hab_r: f32) -> Goal {
     if ag.hunger > 0.7
         && (ag.pack.mass_of(craft_id::RAMEN) > 0.5
             || ag.pack.mass_of(craft_id::RICH_RAMEN) > 0.5
@@ -253,7 +267,13 @@ fn choose_goal(
     {
         return Goal::Eat;
     }
-    if ag.fatigue > 0.75 || light < 0.15 {
+    let home_dth = angle_arc(ag.theta, ag.plot_theta) * hab_r;
+    let home_dz = ag.z - ag.plot_z;
+    let home_far = home_dth * home_dth + home_dz * home_dz > 12.0 * 12.0;
+    if (ag.fatigue > 0.75 || light < 0.25) && home_far {
+        return Goal::GoHome;
+    }
+    if ag.fatigue > 0.75 || light < 0.25 {
         return Goal::Rest;
     }
     // Social: approach player if nearby and mood ok.
@@ -309,9 +329,31 @@ fn execute_goal(
             ag.mood = (ag.mood + 0.05 * dt).min(1.0);
             chronicle.record(day, ag.theta, ag.z, EventKind::Rest, ag.id, dt, "rest");
         }
+        Goal::GoHome => {
+            step_toward(
+                ag,
+                ag.plot_theta,
+                ag.plot_z,
+                hab.radius,
+                16.0 * dt * (0.45 + light),
+            );
+            let dth = angle_arc(ag.theta, ag.plot_theta) * hab.radius;
+            let dz = ag.z - ag.plot_z;
+            if dth * dth + dz * dz <= 12.0 * 12.0 {
+                ag.goal = Goal::Rest;
+                ag.fatigue = (ag.fatigue - 0.18 * dt).max(0.0);
+                ag.mood = (ag.mood + 0.03 * dt).min(1.0);
+                chronicle.record(day, ag.theta, ag.z, EventKind::Rest, ag.id, dt, "home rest");
+            }
+        }
         Goal::Eat => {
             let mut ate = 0.0f32;
-            for id in [craft_id::RICH_RAMEN, craft_id::RAMEN, bio_id::GREEN, bio_id::SEED] {
+            for id in [
+                craft_id::RICH_RAMEN,
+                craft_id::RAMEN,
+                bio_id::GREEN,
+                bio_id::SEED,
+            ] {
                 let take = ag.pack.take_mass(id, 1.2);
                 if take > 0.05 {
                     ate += take;
@@ -325,7 +367,13 @@ fn execute_goal(
             }
         }
         Goal::ApproachPlayer => {
-            step_toward(ag, player_theta, player_z, hab.radius, 14.0 * dt * (0.5 + light));
+            step_toward(
+                ag,
+                player_theta,
+                player_z,
+                hab.radius,
+                14.0 * dt * (0.5 + light),
+            );
         }
         Goal::Harvest => {
             wander_in_plot(ag, dt, light);
@@ -455,13 +503,7 @@ fn step_toward(ag: &mut Agent, th: f32, z: f32, hab_r: f32, dist: f32) {
     ag.z += dz * k;
 }
 
-fn nearest_plant(
-    plants: &PlantSim,
-    theta: f32,
-    z: f32,
-    radius: f32,
-    hab_r: f32,
-) -> Option<usize> {
+fn nearest_plant(plants: &PlantSim, theta: f32, z: f32, radius: f32, hab_r: f32) -> Option<usize> {
     let r2 = radius * radius;
     let mut best = None;
     let mut best_d = f32::MAX;
@@ -500,7 +542,13 @@ mod tests {
         let hab = Habitat::kepler_drum();
         let mut ter = Terrain::generate(hab);
         let mut plants = PlantSim::new();
-        plants.seed_stands(&hab, &ter.elev, &ter.flow.flux, &crate::soil::Soil::new(hab, &ter.elev, &ter.flow.flux, &ter.elev0), 200);
+        plants.seed_stands(
+            &hab,
+            &ter.elev,
+            &ter.flow.flux,
+            &crate::soil::Soil::new(hab, &ter.elev, &ter.flow.flux, &ter.elev0),
+            200,
+        );
         let mut chron = Chronicle::default();
         let mut sim = AgentSim::new();
         sim.seed_farmers(&hab, &ter.elev, 1);

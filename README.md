@@ -5,6 +5,8 @@ mountains, caves, erosion-carved drainage, a homestead and towns overhead.
 
 **Play:** [Download builds](https://mhsenkow.github.io/ramen/) · [Releases](https://github.com/mhsenkow/ramen/releases)
 
+Desktop builds ship for **macOS**, **Windows**, **Linux**, **Steam Deck**, and **Low Spec** Linux via GitHub Releases. The Pages site wires download buttons to the latest release assets.
+
 ## Walk around in it
 
 ```bash
@@ -17,11 +19,29 @@ mountains, caves, erosion-carved drainage, a homestead and towns overhead.
 **Q/E** or two-finger side-scroll: brush size · **scroll**: camera zoom
 **1-4** module · **B** drop a waypoint · **+/-** plan-view zoom
 **T** throw (Coriolis) · **P** tilt-shift · **TAB** switch view
-**Esc** menu — rebind any key, look sensitivity, FOV, invert Y
+**F2/F3** cycle your build · **Esc → Build** the full character creator
+**Esc** menu — rebind any key, look sensitivity, FOV, invert Y, reduced motion, HUD density
 
 Gamepad works throughout: left stick moves, right stick looks, triggers
 excavate and install, shoulders size the brush, D-pad handles waypoints and
 plan zoom, Start opens the menu.
+
+Headless checks:
+
+```bash
+Godot --path game -- --selftest          # sim + mesh smoke
+Godot --path game -- --bisect            # hide groups; print brightest culprit
+Godot --path game -- --bisect-metric=var # luminance variance (endcap patterns)
+Godot --path game -- --playtest          # time first look-up / walk / dig → clipboard
+Godot --path game -- --photo             # hide HUD
+Godot --path game -- --quality=low       # foliage/LOD cut (§2195)
+Godot --path game -- --no-threaded       # mesh chunks on the main thread
+Godot --path game -- --parade            # build + gait contact sheets
+python3 tools/check_shader_includes.py
+python3 tools/check_shader_literals.py
+python3 tools/check_multimesh_init.py
+python3 tools/check_ui_contrast.py
+```
 
 Kepler Drum is **900 m radius x 6000 m long** — 5.65 km around, ~9 minutes to
 run a full lap.
@@ -40,9 +60,16 @@ around the drum and you come back to where you started.
 | `docs/LANDSCAPE_800.md` | 600 more: forests, rivers, rain, mountains, graphics (items 201-800) |
 | `docs/LANDSCAPE_1400.md` | 600 more: material economy, food web, evolution, memory, magic (items 801-1400) |
 | `docs/LANDSCAPE_2000.md` | 600 more: agent colonists, romance from shared work, multiplayer (items 1401-2000) |
+| `docs/LANDSCAPE_2200.md` | 200 more: rendering discipline, debugging, UI, audio, shipping (items 2001-2200) |
+| `docs/LANDSCAPE_3200.md` | 1000 more: light, far side, biomes, species, water, weather, performance (items 2201-3200) |
+| `docs/RENDER_CONTRACT.md` | Colour-space + light contract enforced by shared shader includes |
+| `docs/AVATARS.md` | Bodies and gaits — the axes, the archetypes, what makes each walk read |
+| `game/scripts/avatar/` | Parametric bodies (`body.gd`) and locomotion (`gait.gd`) |
 | `game/scripts/controls.gd` | Every binding, in one table, registered into InputMap |
-| `game/scripts/menu.gd` | Pause menu, rebinding, look settings |
+| `game/scripts/menu.gd` | Pause menu, rebinding, look + accessibility settings |
 | `game/scripts/audio.gd` | Procedurally generated sound — no assets to ship |
+| `game/scripts/debug/bisect.gd` | Visual bisect harness (`--bisect`) |
+| `tools/check_*.py` | CI craft gates (shader includes, metre literals, MultiMesh colours) |
 | `shots/` | Rendered stills |
 
 ## Rebuild the Rust core after editing `sim/`
@@ -79,11 +106,49 @@ fill =  A U sphere   ->  d = max(d, radius - dist)
 The brush centre snaps to a 1 m grid, so each bite reads as a discrete chunk of
 rock while the field underneath stays smooth. Only the strokes are stored —
 20 bytes each — never the world. A bucketed spatial index keeps density
-sampling at ~180 ns even with edits applied.
+sampling at ~130 ns even with edits applied — and a chunk skips that index
+entirely for the columns it can prove no stroke reaches.
 
 **Bedrock is a physical bound, not an invisible wall.** The 8 m shell against
 the hull returns before edits are applied, so it is genuinely undiggable. You
 cannot mine your way into vacuum.
+
+## What a chunk costs
+
+A near chunk is the only thing on a frame that costs milliseconds rather than
+microseconds, so it is the whole performance story. It used to cost **~19.6 ms**
+— every frame that streamed one was a dropped frame. It now costs **~2.6 ms**.
+
+```bash
+./sim/target/release/bench     # prints mesh / paint / flat-shade per chunk
+```
+
+Four things got it there, in order of size:
+
+- **Paint before flat-shading.** Flat shading triples the vertex count, and
+  colours were being computed after it — so every corner of every triangle was
+  painted, three times over the same surface point. Painting is the *expensive*
+  half of a chunk, more than meshing.
+- **Fill the density lattice column-major.** Surface radius, slope, strata phase
+  and drainage depend only on (θ, z), so a radial column of ~30 voxels shares
+  one set of grid lookups instead of paying for its own thirty times.
+- **Skip the rock and the air.** The cave-tube term can never carve more than
+  22 m, so anything deeper than that is unambiguously solid and is written as
+  plain `r − surf`; anything more than 3 m above the surface is unambiguously
+  air. Both shortcuts are *exact where the mesh can see them* — the radial band
+  is derived from a per-column elevation survey, and
+  `chunker::tests::shortcuts_do_not_move_the_surface` checks the mesh against a
+  no-shortcut reference vertex for vertex.
+- **Spread one chunk over threads.** `std::thread::scope` over disjoint slices
+  of the field buffer and of the vertex array — everything read is shared
+  immutably, so it is the borrow the compiler already checks. `--no-threaded`
+  falls back to one thread, and so does a machine with two cores.
+
+The **radial band is now derived, not defensive**, which is what stopped tall
+relief from exploding the lattice. The consequence: anything that adds or
+removes material outside `[surf − 3 m, surf + 26 m]` — an artifact bore, a shaft
+you sank last night — **must** be enumerated by `Terrain::features_near`, or it
+will simply not be meshed.
 
 ## Tools
 
@@ -98,10 +163,46 @@ strokes rather than as voxels, undo is exact and free.
 **Waypoints.** Drop a mark with **B**; it appears on the habitat map and the
 HUD gives you its bearing and distance, alongside the way home.
 
+## Who is in here
+
+Colonists are **parametric**, not eight prefabs. A body is a dictionary of
+numbers and so is a gait; an archetype is a named point in those spaces, and
+nothing downstream knows the names.
+
+    twink · lanky · otter · jock · daddy · muscle daddy · cub · bear
+
+Any two of them blend, so the spread is a spectrum rather than a menu, and a
+body built by hand still moves like the body it is — `gait.for_body()` derives a
+walk from the shape. Mass widens the stance and shortens the stride. Muscle
+locks the thorax and holds the arms off the ribs, which is why a big man's arms
+swing a little and a slight man's swing a lot. Limb length lengthens the stride
+and slows the cadence.
+
+Gait phase advances with **distance travelled**, never with time, so feet cannot
+skate at any speed. Each movement is placed at a phase — heel strike, toe-off,
+knee peak, the dip of arriving weight — rather than layered out of sines, which
+is what makes a waddle read as a waddle instead of a bigger sway.
+
+You are one of them, and so is everyone you will meet:
+
+```bash
+Godot --path game -- --parade
+```
+
+The near six colonists get real articulated rigs and chase their sim position at
+their own walking speed; everyone further out is one MultiMesh per build, baked
+from the same construction, so a bear reads as a bear across a field. A
+colonist's build comes from his id alone, varied per man — stable for the life
+of the save with nothing to persist.
+
+Details, and what makes each walk recognisable, in `docs/AVATARS.md`.
+
 ## Atmosphere
 
-Daylight is a **schedule someone set**, not an orbit. The axis strip dims and
-warms on a 7-minute cycle; nothing crosses a sky, because there is no sky. A
+Daylight is a **schedule someone set**, not an orbit. A lit carriage runs the
+length of the axis on a 7-minute cycle, and the sun is aimed *at it* — so when
+it is still down the habitat the light rakes along the drum and hillsides have
+a lit side and a dark one. Nothing crosses a sky, because there is no sky. A
 cloud band sits at one radius — in a drum, "altitude" is a radius and the
 condensers run at a fixed level. Dust drifts near the player.
 
@@ -116,7 +217,9 @@ condensers run at a fixed level. Dust drifts near the player.
 - Gravity is radial. There is no world "up" anywhere in the code.
 - Voxel chunks are **flat Euclidean grids placed by rotation** — sagitta over a
   32 m chunk is 0.21 m, below terrain noise.
-- Light comes from the axis strip, plus a green bounce term off the far side.
+- Light comes from the day-carriage on the axis, plus a green bounce term off
+  the far side. Its direction is where the carriage actually is, which is why
+  morning rakes and midday does not.
 - Structural ribs are undiggable and are why you cannot mine into vacuum.
 
 ## Known MVP gaps
@@ -146,9 +249,12 @@ Per `docs/LANDSCAPE_200.md` + `docs/LANDSCAPE_800.md`:
 
 ## Two environment gotchas, hard-won
 
-- **Do not use `rayon` inside the GDExtension.** Its thread pool gets the whole
-  Godot process SIGKILLed here (exit 137, zero output) while the same code is
-  fine in a standalone binary. Generation is 1.8 s single-threaded.
+- **Exit 137 on load was almost always codesign**, not threading. Overwriting
+  the dylib in place invalidates its ad-hoc signature and macOS SIGKILLs Godot
+  with zero output — use `./build.sh`. A corrupt `game/.godot/` import cache
+  produces the same silent kill. Threading is being retested behind
+  `--threaded` (`LANDSCAPE_3200` §BI); keep generation single-threaded until
+  that gate passes.
 - **If Godot dies instantly with exit 137, delete `game/.godot/` and run
   twice.** A corrupt import cache produces exactly the same silent kill. The
   extension registers on the second load; `game/.godot/extension_list.cfg` must
@@ -160,6 +266,17 @@ Per `docs/LANDSCAPE_200.md` + `docs/LANDSCAPE_800.md`:
 - GDScript parse errors leave Godot sitting on an empty scene forever with
   stdout buffered, so a hang usually means a parse error. `--log-file` is the
   only reliable way to see it.
+- **A MultiMesh instance colour multiplies the source mesh's vertex colour**,
+  and the prop shaders then raise the product to 1.95. Two mid-tone colours
+  multiply to a hundredth of what either was authored at. That was the black
+  pebbles on every grassland and the black sticks in every meadow. Source
+  meshes carry a luminance *ratio*; the instance carries the hue.
+  (`RENDER_CONTRACT.md` §2009.)
+- **A hash is not noise.** `fract(sin(dot(p, k)) * 43758.0)` of a continuous
+  coordinate has no feature size, so every pixel is an independent sample and it
+  aliases into radial streaks across the drum — the exact artefact the
+  arc-metre rule exists to prevent. Smooth-interpolate, or do not sample it in
+  world space.
 - **Never scale a tuned constant by absolute metres.** `prox` in the terrain
   shader had `900.0` baked in from when the drum was 600 m; growing the drum
   silently clamped it to its floor and crushed all lighting to near-black.

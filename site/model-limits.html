@@ -1,0 +1,39 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Model limits — RAMA CYCLE</title>
+  <meta name="description" content="Stated limits of the Kepler Drum biosphere simulation. Honesty of mechanism beats implied precision." />
+  <link href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=IBM+Plex+Sans:wght@400;500&display=swap" rel="stylesheet" />
+  <style>
+    :root { --void:#07090d; --ink:#e8ece6; --muted:#9aa39a; --sun:#e6c46a; --line:rgba(232,236,230,.12); }
+    body { font-family:"IBM Plex Sans",system-ui,sans-serif; background:var(--void); color:var(--ink); line-height:1.55; margin:0; }
+    main { width:min(720px, calc(100% - 2rem)); margin:3rem auto 4rem; }
+    h1 { font-family:"Instrument Serif",Georgia,serif; font-weight:400; font-size:clamp(2rem,5vw,2.8rem); margin:0 0 .5rem; }
+    .lede { color:var(--muted); margin-bottom:2rem; }
+    table { width:100%; border-collapse:collapse; font-size:.95rem; }
+    th, td { text-align:left; padding:.65rem .4rem; border-bottom:1px solid var(--line); vertical-align:top; }
+    th { color:var(--sun); font-weight:500; }
+    a { color:var(--sun); }
+  </style>
+</head>
+<body>
+<main>
+  <h1>Model limits</h1>
+  <p class="lede">Stated limits beat implied precision. This page mirrors <code>docs/MODEL_LIMITS.md</code> so players and critics see the same contract the sim ships under.</p>
+  <table>
+    <tr><th>Topic</th><th>Limit</th></tr>
+    <tr><td>Hydrology</td><td>Waterline cells are outlets. No Manning routing. Lakes are ponded cells ≤12&nbsp;m deep.</td></tr>
+    <tr><td>Fluvial</td><td>Generation droplets + live rainfall-weighted tick. Toy networks.</td></tr>
+    <tr><td>Materials</td><td>Eight derived types + biomass + crafted + cooking. No vein depletion yet.</td></tr>
+    <tr><td>Atmosphere</td><td>Lumped O₂/CO₂/N₂. Scrubbing is power→stoichiometry.</td></tr>
+    <tr><td>Trophic</td><td>Miami NPP. Flat 10% transfer. Kleiber densities. Fear cascade.</td></tr>
+    <tr><td>Agents</td><td>Utility AI farmers (≤12). Chronicle affinity. No full romance sim yet.</td></tr>
+    <tr><td>Soil</td><td>Full 768×512 SoA (not sparse deltas yet).</td></tr>
+    <tr><td>Audio</td><td>Procedural toy DSP — not physical modelling.</td></tr>
+  </table>
+  <p style="margin-top:2rem;color:var(--muted)"><a href="./">← RAMA CYCLE</a></p>
+</main>
+</body>
+</html>

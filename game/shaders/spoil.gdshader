@@ -1,6 +1,8 @@
 shader_type spatial;
 render_mode unshaded, cull_back, depth_draw_opaque;
 
+#include "rama_light.gdshaderinc"
+
 // Spoil mounds — same axis-strip light as terrain so dig piles belong.
 
 global uniform float rama_day;
@@ -26,31 +28,27 @@ void fragment() {
     float dist = length(w_pos - CAMERA_POSITION_WORLD);
     // Soft near/far so heaps don't read as hard debug blobs.
     float near_keep = smoothstep(1.2, 4.0, dist);
+    // feature: spoil heap ~3–8 m → retire 120–280 m
     float far_fade = 1.0 - smoothstep(120.0, 280.0, dist);
     if (far_fade * near_keep < 0.02) {
         discard;
     }
 
     vec3 N = normalize(w_nrm);
-    vec3 to_axis = normalize(vec3(-w_pos.x, -w_pos.y, 0.0));
+    vec3 to_axis = rama_to_axis(w_pos);
     float ndl = pow(max(dot(N, to_axis), 0.0), 0.72);
     float amb = 0.34 + 0.48 * (1.0 - ndl);
-    vec3 sun = mix(night_tint, sun_tint, rama_day);
-    float energy = 2.05 * (0.30 + 0.70 * rama_day);
+    vec3 sun = rama_sun(night_tint, sun_tint, rama_day);
+    float energy = rama_energy(2.05, rama_day);
     // Subtle mound mottling so it's not a plastic sphere.
     float mott = 0.92 + 0.08 * sin(w_pos.x * 3.1 + w_pos.z * 2.4)
                + 0.05 * sin(w_pos.y * 4.2 - w_pos.z * 1.7);
-    // Same sRGB-as-linear bug the terrain had: instance colours are authored
-    // as sRGB but ALBEDO is linear, which turned every spoil heap into a cream
-    // blob. Convert, and pay for it with energy.
-    vec3 body = pow(max(v_col.rgb, vec3(0.0)), vec3(1.95)) * mott;
+    vec3 body = srgb_to_linear(v_col.rgb) * mott;
     body = body * (sun * ndl * energy
                  + bounce_tint * amb * 0.60
-                 + vec3(0.075, 0.082, 0.095) * (0.40 + 0.60 * rama_day));
+                 + rama_sky_fill(rama_day) * 0.9);
 
-    float f = clamp((dist - haze_start) / (haze_end - haze_start), 0.0, 1.0);
-    f = pow(f, 1.1) * 0.75 * rama_haze;
-    vec3 air = haze_color * (0.45 + 0.55 * rama_day);
-    ALBEDO = mix(body, air, f);
+    float f = rama_haze_factor(dist, haze_start, haze_end, 0.75, rama_haze);
+    ALBEDO = mix(body, rama_air(haze_color, rama_day), f);
     ALPHA = 1.0;
 }

@@ -9,11 +9,17 @@
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
 
-use crate::terrain::{NT, NZ, idx};
+use crate::terrain::{idx, NT, NZ};
 
 const N8: [(i32, i32); 8] = [
-    (-1,  0), (1,  0), (0, -1), (0,  1),
-    (-1, -1), (-1, 1), (1, -1), (1,  1),
+    (-1, 0),
+    (1, 0),
+    (0, -1),
+    (0, 1),
+    (-1, -1),
+    (-1, 1),
+    (1, -1),
+    (1, 1),
 ];
 
 #[derive(Clone)]
@@ -63,7 +69,9 @@ impl Default for Flow {
 }
 
 impl Flow {
-    pub fn mark_dirty(&mut self) { self.dirty = true; }
+    pub fn mark_dirty(&mut self) {
+        self.dirty = true;
+    }
 
     /// Mark a cylindrical neighbourhood dirty (player dig / fill).
     pub fn mark_dirty_at(&mut self, ti: usize, zi: usize, radius_cells: i32) {
@@ -84,7 +92,9 @@ impl Flow {
         }
     }
 
-    pub fn is_dirty(&self) -> bool { self.dirty }
+    pub fn is_dirty(&self) -> bool {
+        self.dirty
+    }
 
     /// Rebuild from elevation. `water_level` cells are outlets (habitat drains).
     pub fn rebuild(&mut self, elev: &[f32], water_level: f32) {
@@ -111,7 +121,9 @@ impl Flow {
         let r = self.dirty_r;
         for dz in -r..=r {
             let zi = z0 + dz;
-            if zi < 0 || zi >= NZ as i32 { continue; }
+            if zi < 0 || zi >= NZ as i32 {
+                continue;
+            }
             for dt in -r..=r {
                 let ti = (t0 + dt).rem_euclid(NT as i32) as usize;
                 let i = idx(ti, zi as usize);
@@ -126,10 +138,14 @@ impl Flow {
         ) as u32;
         for _ in 0..256 {
             let i = cur as usize;
-            if i >= elev.len() { break; }
+            if i >= elev.len() {
+                break;
+            }
             self.filled[i] = elev[i];
             let nxt = self.down[i];
-            if nxt == cur { break; }
+            if nxt == cur {
+                break;
+            }
             cur = nxt;
         }
         self.finish_routing(elev, water_level);
@@ -156,7 +172,11 @@ impl Flow {
             }
         }
         self.lake_count = lakes;
-        self.mean_fill_depth = if lakes > 0 { fill_sum / lakes as f32 } else { 0.0 };
+        self.mean_fill_depth = if lakes > 0 {
+            fill_sum / lakes as f32
+        } else {
+            0.0
+        };
         normalise_flux(&self.discharge, &mut self.flux);
         self.route_sig = hash_down(&self.down);
         self.dirty = false;
@@ -164,10 +184,14 @@ impl Flow {
 
     /// How many downstream pointers differ from `prev` (reroute metric).
     pub fn down_diff_count(&self, prev: &[u32]) -> u32 {
-        if prev.len() != self.down.len() { return self.down.len() as u32; }
+        if prev.len() != self.down.len() {
+            return self.down.len() as u32;
+        }
         let mut n = 0u32;
         for (a, b) in self.down.iter().zip(prev.iter()) {
-            if a != b { n += 1; }
+            if a != b {
+                n += 1;
+            }
         }
         n
     }
@@ -197,7 +221,13 @@ impl Flow {
 
     /// Local catchment sample for HUD: cells within `radius` that drain to
     /// `(ti,zi)`, returned as grid indices. Avoids a full-grid walk.
-    pub fn catchment_local(&self, ti: usize, zi: usize, radius: i32, limit: usize) -> Vec<(usize, usize)> {
+    pub fn catchment_local(
+        &self,
+        ti: usize,
+        zi: usize,
+        radius: i32,
+        limit: usize,
+    ) -> Vec<(usize, usize)> {
         if !self.up_idx.is_empty() {
             return self.catchment_upstream(ti, zi, limit);
         }
@@ -208,13 +238,17 @@ impl Flow {
         let step = (r / 24).max(1) as usize;
         for dz in (-r..=r).step_by(step) {
             let zz = zi as i32 + dz;
-            if zz < 0 || zz >= NZ as i32 { continue; }
+            if zz < 0 || zz >= NZ as i32 {
+                continue;
+            }
             for dt in (-r..=r).step_by(step) {
                 let tt = (ti as i32 + dt).rem_euclid(NT as i32) as usize;
                 let i = idx(tt, zz as usize);
                 if walk_reaches(&self.down, i as u32, target, &mut memo) {
                     out.push((tt, zz as usize));
-                    if out.len() >= limit { return out; }
+                    if out.len() >= limit {
+                        return out;
+                    }
                 }
             }
         }
@@ -232,13 +266,19 @@ impl Flow {
         while let Some(cur) = stack.pop() {
             let i = cur as usize;
             out.push((i % NT, i / NT));
-            if out.len() >= lim { break; }
-            if i + 1 >= self.up_off.len() { continue; }
+            if out.len() >= lim {
+                break;
+            }
+            if i + 1 >= self.up_off.len() {
+                continue;
+            }
             let a = self.up_off[i] as usize;
             let b = self.up_off[i + 1] as usize;
             for &u in &self.up_idx[a..b.min(self.up_idx.len())] {
                 let ui = u as usize;
-                if ui >= seen.len() || seen[ui] { continue; }
+                if ui >= seen.len() || seen[ui] {
+                    continue;
+                }
                 seen[ui] = true;
                 stack.push(u);
             }
@@ -290,21 +330,37 @@ fn walk_reaches(down: &[u32], start: u32, target: u32, memo: &mut [u8]) -> bool 
     let mut cur = start;
     loop {
         let i = cur as usize;
-        if i >= down.len() { return false; }
+        if i >= down.len() {
+            return false;
+        }
         match memo[i] {
-            1 => { for &p in &path { memo[p as usize] = 1; } return true; }
-            2 => { for &p in &path { memo[p as usize] = 2; } return false; }
+            1 => {
+                for &p in &path {
+                    memo[p as usize] = 1;
+                }
+                return true;
+            }
+            2 => {
+                for &p in &path {
+                    memo[p as usize] = 2;
+                }
+                return false;
+            }
             _ => {}
         }
         if cur == target {
-            for &p in &path { memo[p as usize] = 1; }
+            for &p in &path {
+                memo[p as usize] = 1;
+            }
             memo[i] = 1;
             return true;
         }
         path.push(cur);
         let nxt = down[i];
         if nxt == cur || path.len() > NT + NZ {
-            for &p in &path { memo[p as usize] = 2; }
+            for &p in &path {
+                memo[p as usize] = 2;
+            }
             return false;
         }
         cur = nxt;
@@ -312,19 +368,28 @@ fn walk_reaches(down: &[u32], start: u32, target: u32, memo: &mut [u8]) -> bool 
 }
 
 #[derive(Copy, Clone)]
-struct Node { elev: f32, i: u32 }
+struct Node {
+    elev: f32,
+    i: u32,
+}
 impl Eq for Node {}
 impl PartialEq for Node {
-    fn eq(&self, o: &Self) -> bool { self.elev == o.elev && self.i == o.i }
+    fn eq(&self, o: &Self) -> bool {
+        self.elev == o.elev && self.i == o.i
+    }
 }
 impl Ord for Node {
     fn cmp(&self, o: &Self) -> Ordering {
-        o.elev.partial_cmp(&self.elev).unwrap_or(Ordering::Equal)
+        o.elev
+            .partial_cmp(&self.elev)
+            .unwrap_or(Ordering::Equal)
             .then_with(|| self.i.cmp(&o.i))
     }
 }
 impl PartialOrd for Node {
-    fn partial_cmp(&self, o: &Self) -> Option<Ordering> { Some(self.cmp(o)) }
+    fn partial_cmp(&self, o: &Self) -> Option<Ordering> {
+        Some(self.cmp(o))
+    }
 }
 
 /// Max ponding depth above true surface (metres). Caps absurd sealed basins.
@@ -341,18 +406,28 @@ fn priority_flood_waterline(elev: &[f32], water_level: f32, filled: &mut [f32]) 
     // cells in case the waterline is sparse.
     for i in 0..n {
         if elev[i] <= water_level + 0.5 {
-            open.push(Node { elev: elev[i], i: i as u32 });
+            open.push(Node {
+                elev: elev[i],
+                i: i as u32,
+            });
             closed[i] = true;
         }
     }
     // Guarantee at least some outlets: lowest 0.5% of cells.
     if open.len() < NT {
         let mut order: Vec<u32> = (0..n as u32).collect();
-        order.sort_by(|&a, &b| elev[a as usize].partial_cmp(&elev[b as usize]).unwrap_or(Ordering::Equal));
+        order.sort_by(|&a, &b| {
+            elev[a as usize]
+                .partial_cmp(&elev[b as usize])
+                .unwrap_or(Ordering::Equal)
+        });
         let take = (n / 200).max(NT);
         for &i in order.iter().take(take) {
             if !closed[i as usize] {
-                open.push(Node { elev: elev[i as usize], i });
+                open.push(Node {
+                    elev: elev[i as usize],
+                    i,
+                });
                 closed[i as usize] = true;
             }
         }
@@ -363,18 +438,27 @@ fn priority_flood_waterline(elev: &[f32], water_level: f32, filled: &mut [f32]) 
         for &(dt, dz) in &N8 {
             let nt = (t as i32 + dt).rem_euclid(NT as i32) as usize;
             let nz = z as i32 + dz;
-            if nz < 0 || nz >= NZ as i32 { continue; }
+            if nz < 0 || nz >= NZ as i32 {
+                continue;
+            }
             let ni = idx(nt, nz as usize);
-            if closed[ni] { continue; }
+            if closed[ni] {
+                continue;
+            }
             closed[ni] = true;
             let fe = elev[ni].max(e).min(elev[ni] + MAX_POND);
             filled[ni] = fe;
-            open.push(Node { elev: fe, i: ni as u32 });
+            open.push(Node {
+                elev: fe,
+                i: ni as u32,
+            });
         }
     }
     // Any unvisited cells (should be none) keep raw elev.
     for i in 0..n {
-        if !closed[i] { filled[i] = elev[i]; }
+        if !closed[i] {
+            filled[i] = elev[i];
+        }
     }
 }
 
@@ -388,10 +472,16 @@ fn compute_d8(filled: &[f32], down: &mut [u32]) {
             for &(dt, dz) in &N8 {
                 let nt = (t as i32 + dt).rem_euclid(NT as i32) as usize;
                 let nz = z as i32 + dz;
-                if nz < 0 || nz >= NZ as i32 { continue; }
+                if nz < 0 || nz >= NZ as i32 {
+                    continue;
+                }
                 let ni = idx(nt, nz as usize);
                 let dh = h - filled[ni];
-                let dist = if dt != 0 && dz != 0 { std::f32::consts::SQRT_2 } else { 1.0 };
+                let dist = if dt != 0 && dz != 0 {
+                    std::f32::consts::SQRT_2
+                } else {
+                    1.0
+                };
                 let slope = dh / dist;
                 if slope > best_dh {
                     best_dh = slope;
@@ -405,15 +495,21 @@ fn compute_d8(filled: &[f32], down: &mut [u32]) {
 
 fn accumulate(down: &[u32], discharge: &mut [f32]) {
     let n = down.len();
-    for d in discharge.iter_mut() { *d = 1.0; }
+    for d in discharge.iter_mut() {
+        *d = 1.0;
+    }
     let mut indeg = vec![0u32; n];
     for i in 0..n {
         let d = down[i] as usize;
-        if d != i { indeg[d] += 1; }
+        if d != i {
+            indeg[d] += 1;
+        }
     }
     let mut queue: Vec<u32> = Vec::with_capacity(n / 8);
     for i in 0..n {
-        if indeg[i] == 0 { queue.push(i as u32); }
+        if indeg[i] == 0 {
+            queue.push(i as u32);
+        }
     }
     let mut head = 0usize;
     let mut order = Vec::with_capacity(n);
@@ -424,14 +520,20 @@ fn accumulate(down: &[u32], discharge: &mut [f32]) {
         let d = down[i as usize] as usize;
         if d != i as usize {
             indeg[d] -= 1;
-            if indeg[d] == 0 { queue.push(d as u32); }
+            if indeg[d] == 0 {
+                queue.push(d as u32);
+            }
         }
     }
     if order.len() < n {
         let mut seen = vec![false; n];
-        for &o in &order { seen[o as usize] = true; }
+        for &o in &order {
+            seen[o as usize] = true;
+        }
         for i in 0..n {
-            if !seen[i] { order.push(i as u32); }
+            if !seen[i] {
+                order.push(i as u32);
+            }
         }
     }
     for &i in &order {
@@ -456,8 +558,10 @@ fn sample_field(e: &[f32], x: f32, y: f32) -> f32 {
     let (fx, fy) = (x - x0 as f32, y - y0 as f32);
     let x1 = (x0 + 1) % NT;
     let y1 = (y0 + 1).min(NZ - 1);
-    let a = e[idx(x0, y0)]; let b = e[idx(x1, y0)];
-    let c = e[idx(x0, y1)]; let d = e[idx(x1, y1)];
+    let a = e[idx(x0, y0)];
+    let b = e[idx(x1, y0)];
+    let c = e[idx(x0, y1)];
+    let d = e[idx(x1, y1)];
     let t = a + (b - a) * fx;
     let u = c + (d - c) * fx;
     t + (u - t) * fy
@@ -483,37 +587,55 @@ pub fn river_segments(
         for t in 0..NT {
             let i = idx(t, z);
             if let Some(lm) = lake_mask {
-                if lm[i] != 0 { continue; }
+                if lm[i] != 0 {
+                    continue;
+                }
             }
             if let Some(pd) = pool_depth {
-                if pd[i] >= pool_mute { continue; }
+                if pd[i] >= pool_mute {
+                    continue;
+                }
             }
             let q = discharge[i];
-            if q < thresh { continue; }
+            if q < thresh {
+                continue;
+            }
             let d = down[i] as usize;
-            if d == i { continue; }
+            if d == i {
+                continue;
+            }
             if let Some(lm) = lake_mask {
-                if lm[d] != 0 { continue; }
+                if lm[d] != 0 {
+                    continue;
+                }
             }
             if let Some(pd) = pool_depth {
-                if pd[d] >= pool_mute { continue; }
+                if pd[d] >= pool_mute {
+                    continue;
+                }
             }
             let mut lateral_max = 0.0f32;
             for &(dt, dz) in &N8 {
                 let nt = (t as i32 + dt).rem_euclid(NT as i32) as usize;
                 let nz = z as i32 + dz;
-                if nz < 0 || nz >= NZ as i32 { continue; }
+                if nz < 0 || nz >= NZ as i32 {
+                    continue;
+                }
                 let ni = idx(nt, nz as usize);
-                if ni == d { continue; }
+                if ni == d {
+                    continue;
+                }
                 lateral_max = lateral_max.max(discharge[ni]);
             }
-            if q < lateral_max * 0.92 { continue; }
+            if q < lateral_max * 0.92 {
+                continue;
+            }
 
             let th0 = t as f32 / NT as f32 * std::f32::consts::TAU;
             let z0 = (z as f32 / NZ as f32 - 0.5) * hab.length;
             let th1 = (d % NT) as f32 / NT as f32 * std::f32::consts::TAU;
             let z1 = ((d / NT) as f32 / NZ as f32 - 0.5) * hab.length;
-            let lift = 0.04 + 0.06 * (q / fmax).sqrt();
+            let lift = 0.10 + 0.08 * (q / fmax).sqrt();
             let r0 = hab.radius - elev[i] - lift;
             let r1 = hab.radius - elev[d] - lift;
             let p0 = hab.to_world(th0, z0, r0);

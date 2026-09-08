@@ -7,7 +7,7 @@ render_mode cull_disabled, unshaded, depth_draw_never, blend_mix;
 
 global uniform float rama_day;
 uniform vec3 tint : source_color = vec3(0.78, 0.84, 0.90);
-uniform float cover = 0.60;
+uniform float cover = 0.55;
 
 varying vec3 w_pos;
 varying vec3 w_norm;
@@ -26,16 +26,31 @@ void vertex() {
 
 void fragment() {
     float th = atan(w_pos.y, w_pos.x);
-    float band = th * 5.5 + TIME * 0.012;
-    float stripe = vnoise(vec2(band, 0.15)) * 0.70
-                 + vnoise(vec2(band * 2.2 + 3.1, 0.4)) * 0.30;
+    // Bands run ALONG the axis — Rossby ~0.025, air cannot cross the drum. But
+    // a band that is literally constant in z projects, when you look up the
+    // drum, into a fan of radial rays: venetian blinds over the whole sky. So
+    // let the band meander in z and break into decks. Same physics, weather
+    // instead of blinds. feature: meander ~600 m of axis, decks ~1100 m
+    float zk = w_pos.z * 0.0016;
+    float band = th * 11.5 + TIME * 0.012
+               + sin(zk * 2.1) * 1.10 + sin(zk * 0.73 + 2.4) * 0.62;
+    float stripe = vnoise(vec2(band, zk * 1.7)) * 0.70
+                 + vnoise(vec2(band * 2.2 + 3.1, zk * 3.1 + 0.4)) * 0.30;
     // 3rd octave for wispy edge texture — what makes clouds not look like
     // a cylinder with alpha.
     float wisp = vnoise(vec2(band * 4.4 + 7.2, w_pos.z * 0.003 + TIME * 0.008)) * 0.15;
     float axial = vnoise(vec2(th * 1.2, w_pos.z * 0.0018 + TIME * 0.004)) * 0.18;
     float n = stripe + axial + wisp;
-    float a = smoothstep(cover, cover + 0.22, n);
+    // Axial bands are physically right (Coriolis), but looked at DOWN the axis
+    // a banded cylinder projects into radial wedges that read as blinds.
+    n = mix(n, 0.5, 0.30);
+    n += (vnoise(vec2(band * 9.0 + 71.0, w_pos.z * 0.0065)) - 0.5) * 0.16;
+    // Decks end. Without this the band is an unbroken ribbon the full 6 km.
+    float deck = vnoise(vec2(zk * 0.55 + TIME * 0.003, th * 0.55));
+    n *= 0.62 + 0.78 * smoothstep(0.28, 0.74, deck);
+    float a = smoothstep(cover, cover + 0.34, n);
     float d = length(w_pos - CAMERA_POSITION_WORLD);
+    // feature: cloud bands fade in by 400 m, out by 3200 m
     a *= clamp(d / 400.0, 0.0, 1.0);
     a *= clamp(1.0 - d / 3200.0, 0.0, 1.0);
 
@@ -51,6 +66,10 @@ void fragment() {
 
     // Dim with the day schedule — bright white decks were bleaching the sky.
     ALBEDO = cloud_col * (0.45 + 0.40 * rama_day) * self_shadow;
-    ALPHA = a * 0.28;
+    // Fade when viewed edge-on — exactly the angle that makes the wedges.
+    vec3 vdir = normalize(w_pos - CAMERA_POSITION_WORLD);
+    vec3 radial = normalize(vec3(w_pos.x, w_pos.y, 0.0));
+    float graze = abs(dot(vdir, radial));
+    ALPHA = a * 0.36 * (0.22 + 0.78 * graze);
 }
 

@@ -213,9 +213,17 @@ That stake does not exist in any Earth-set farming game. Take it.
 ### 3.6 Weather is engineered, not natural
 
 The habitat has no weather. It has **infrastructure that produces weather.**
-Rain falls because condensers run. Day length is a lighting schedule someone
-set. "Seasons" are a policy the colony votes on. Temperature is a radiator
-budget.
+
+The **Photothermal Spine** is the closed water + light loop:
+
+1. Dim always-on spine bleeds process heat and **water vapor** into the atmosphere.
+2. The traveling **day-carriage** is the lighting schedule (dawn wave along z).
+3. **Condensers** capture humidity and precipitate rain.
+4. Soil / rivers reclaim; power budget throttles condensers.
+
+Day length is a schedule someone set — Godot drives the spectacle clock into
+`weather.set_day_schedule` so plants and picture share one phase. "Seasons" are
+a policy the colony votes on. Temperature is a radiator budget.
 
 So the player can *change the climate* by reallocating power — and pays for it
 somewhere else in a closed energy budget. This is a mechanic no terrestrial

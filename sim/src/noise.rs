@@ -29,7 +29,9 @@ fn hash3(x: i32, y: i32, z: i32, seed: u32) -> f32 {
 }
 
 #[inline]
-fn smooth(t: f32) -> f32 { t * t * (3.0 - 2.0 * t) }
+fn smooth(t: f32) -> f32 {
+    t * t * (3.0 - 2.0 * t)
+}
 
 /// Value noise on a torus in x (period `px` cells) so terrain wraps seamlessly
 /// around the drum. Returns 0..1.
@@ -51,12 +53,28 @@ pub fn value2_wrapped(x: f32, y: f32, px: i32, seed: u32) -> f32 {
 
 pub fn value3(x: f32, y: f32, z: f32, seed: u32) -> f32 {
     let (xi, yi, zi) = (x.floor() as i32, y.floor() as i32, z.floor() as i32);
-    let (xf, yf, zf) = (smooth(x - xi as f32), smooth(y - yi as f32), smooth(z - zi as f32));
+    let (xf, yf, zf) = (
+        smooth(x - xi as f32),
+        smooth(y - yi as f32),
+        smooth(z - zi as f32),
+    );
     let l = |a: f32, b: f32, t: f32| a + (b - a) * t;
     let c00 = l(hash3(xi, yi, zi, seed), hash3(xi + 1, yi, zi, seed), xf);
-    let c10 = l(hash3(xi, yi + 1, zi, seed), hash3(xi + 1, yi + 1, zi, seed), xf);
-    let c01 = l(hash3(xi, yi, zi + 1, seed), hash3(xi + 1, yi, zi + 1, seed), xf);
-    let c11 = l(hash3(xi, yi + 1, zi + 1, seed), hash3(xi + 1, yi + 1, zi + 1, seed), xf);
+    let c10 = l(
+        hash3(xi, yi + 1, zi, seed),
+        hash3(xi + 1, yi + 1, zi, seed),
+        xf,
+    );
+    let c01 = l(
+        hash3(xi, yi, zi + 1, seed),
+        hash3(xi + 1, yi, zi + 1, seed),
+        xf,
+    );
+    let c11 = l(
+        hash3(xi, yi + 1, zi + 1, seed),
+        hash3(xi + 1, yi + 1, zi + 1, seed),
+        xf,
+    );
     l(l(c00, c10, yf), l(c01, c11, yf), zf)
 }
 
@@ -67,7 +85,9 @@ pub fn fbm2(x: f32, y: f32, px: i32, oct: u32, seed: u32) -> f32 {
     for o in 0..oct {
         sum += value2_wrapped(x * f, y * f, p.max(1), seed.wrapping_add(o * 7919)) * a;
         norm += a;
-        f *= 2.0; a *= 0.5; p *= 2;
+        f *= 2.0;
+        a *= 0.5;
+        p *= 2;
     }
     sum / norm
 }
@@ -77,7 +97,8 @@ pub fn fbm3(x: f32, y: f32, z: f32, oct: u32, seed: u32) -> f32 {
     for o in 0..oct {
         sum += value3(x * f, y * f, z * f, seed.wrapping_add(o * 6271)) * a;
         norm += a;
-        f *= 2.0; a *= 0.5;
+        f *= 2.0;
+        a *= 0.5;
     }
     sum / norm
 }
@@ -91,7 +112,9 @@ pub fn ridged2(x: f32, y: f32, px: i32, oct: u32, seed: u32) -> f32 {
         let r = 1.0 - (n * 2.0 - 1.0).abs();
         sum += r * r * a;
         norm += a;
-        f *= 2.0; a *= 0.5; p *= 2;
+        f *= 2.0;
+        a *= 0.5;
+        p *= 2;
     }
     sum / norm
 }

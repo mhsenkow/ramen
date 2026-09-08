@@ -4,7 +4,7 @@
 //! continuous sequel: a few thousand droplets per call, rainfall-weighted,
 //! hardness-gated, deterministic from an LCG seed.
 
-use crate::terrain::{NT, NZ, idx};
+use crate::terrain::{idx, NT, NZ};
 
 /// Live erosion pass over the elevation grid.
 pub struct Erosion;
@@ -39,8 +39,11 @@ impl Erosion {
                 vx = vx * 0.55 - gx * 1.4;
                 vy = vy * 0.55 - gy * 1.4;
                 let len = (vx * vx + vy * vy).sqrt();
-                if len < 1e-4 { break; }
-                vx /= len; vy /= len;
+                if len < 1e-4 {
+                    break;
+                }
+                vx /= len;
+                vy /= len;
                 let (nx, ny) = (px + vx, py + vy);
                 let nyc = ny.clamp(1.0, NZ as f32 - 2.0);
                 let nh = sample(elev, nx, nyc);
@@ -55,7 +58,11 @@ impl Erosion {
 
                 let capacity = (-dh).max(0.0) * water * 5.5 + 0.02;
                 if sed > capacity || dh > 0.0 {
-                    let drop = if dh > 0.0 { sed.min(dh) } else { (sed - capacity) * 0.35 };
+                    let drop = if dh > 0.0 {
+                        sed.min(dh)
+                    } else {
+                        (sed - capacity) * 0.35
+                    };
                     deposit(elev, px, py, drop);
                     sed -= drop;
                     moved += drop.abs();
@@ -130,7 +137,9 @@ fn spawn(rainfall: &[f32], weighted: bool, rmax: f32, seed: &mut u32) -> (f32, f
 }
 
 #[inline]
-fn wrap_t(x: f32) -> f32 { x.rem_euclid(NT as f32) }
+fn wrap_t(x: f32) -> f32 {
+    x.rem_euclid(NT as f32)
+}
 
 fn sample(e: &[f32], x: f32, y: f32) -> f32 {
     let x = wrap_t(x);
@@ -139,8 +148,10 @@ fn sample(e: &[f32], x: f32, y: f32) -> f32 {
     let (fx, fy) = (x - x0 as f32, y - y0 as f32);
     let x1 = (x0 + 1) % NT;
     let y1 = (y0 + 1).min(NZ - 1);
-    let a = e[idx(x0, y0)]; let b = e[idx(x1, y0)];
-    let c = e[idx(x0, y1)]; let d = e[idx(x1, y1)];
+    let a = e[idx(x0, y0)];
+    let b = e[idx(x1, y0)];
+    let c = e[idx(x0, y1)];
+    let d = e[idx(x1, y1)];
     let t = a + (b - a) * fx;
     let u = c + (d - c) * fx;
     t + (u - t) * fy
@@ -154,10 +165,12 @@ fn grad(e: &[f32], x: f32, y: f32) -> (f32, f32, f32) {
 }
 
 fn deposit(e: &mut [f32], x: f32, y: f32, amt: f32) {
-    let x = wrap_t(x); let y = y.clamp(0.0, NZ as f32 - 1.001);
+    let x = wrap_t(x);
+    let y = y.clamp(0.0, NZ as f32 - 1.001);
     let (x0, y0) = (x.floor() as usize, y.floor() as usize);
     let (fx, fy) = (x - x0 as f32, y - y0 as f32);
-    let x1 = (x0 + 1) % NT; let y1 = (y0 + 1).min(NZ - 1);
+    let x1 = (x0 + 1) % NT;
+    let y1 = (y0 + 1).min(NZ - 1);
     e[idx(x0, y0)] += amt * (1.0 - fx) * (1.0 - fy);
     e[idx(x1, y0)] += amt * fx * (1.0 - fy);
     e[idx(x0, y1)] += amt * (1.0 - fx) * fy;
