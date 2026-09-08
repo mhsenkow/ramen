@@ -176,6 +176,21 @@
       margin-bottom: 2rem;
     }
 
+    .firstrun {
+      max-width: 42rem;
+      color: var(--muted);
+      font-size: 0.92rem;
+      margin: -1rem 0 2rem;
+      padding-left: 1.15rem;
+      display: grid;
+      gap: 0.55rem;
+    }
+
+    .firstrun code {
+      font-size: 0.85em;
+      color: var(--sun);
+    }
+
     .downloads {
       display: grid;
       gap: 0.85rem;
@@ -345,9 +360,14 @@
     <h2 class="section-title" id="download-title">Download</h2>
     <p class="section-copy">
       Prebuilt builds for macOS, Windows, Linux, Steam Deck, and low-spec Linux.
-      First launch on macOS may need right-click → Open. Requires a GPU that can
-      run Godot 4 Forward+ (Deck / low-spec defaults dial foliage and LOD down).
+      Requires a GPU that can run Godot 4 Forward+ (Deck / low-spec dial foliage down).
+      Each zip includes <code>FIRST_RUN.txt</code> with platform open steps.
     </p>
+    <ul class="firstrun">
+      <li><strong>macOS</strong> — notarized when possible; if Gatekeeper blocks, run <code>Open RAMA CYCLE.command</code> or System Settings → Privacy &amp; Security → Open Anyway.</li>
+      <li><strong>Windows</strong> — SmartScreen may warn on first launch: More info → Run anyway.</li>
+      <li><strong>Linux / Deck</strong> — use <code>Run RAMA CYCLE.sh</code> or <code>chmod +x RamaCycle.x86_64</code>.</li>
+    </ul>
     <div class="downloads" id="download-list">
       <div class="download">
         <div>

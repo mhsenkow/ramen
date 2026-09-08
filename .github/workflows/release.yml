@@ -111,22 +111,87 @@ jobs:
           echo "Export produced no artifacts (godot exit=${status})"
           exit 1
 
+      - name: Sign and notarize macOS
+        if: matrix.platform == 'macos'
+        env:
+          MACOS_CERTIFICATE: ${{ secrets.MACOS_CERTIFICATE }}
+          MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+          NOTARY_API_KEY: ${{ secrets.NOTARY_API_KEY }}
+          NOTARY_API_KEY_ID: ${{ secrets.NOTARY_API_KEY_ID }}
+          NOTARY_API_ISSUER: ${{ secrets.NOTARY_API_ISSUER }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          set -euo pipefail
+          WORK="$RUNNER_TEMP/rama-mac"
+          rm -rf "$WORK"
+          mkdir -p "$WORK"
+          ZIP="dist/macos/${{ matrix.out_name }}"
+          # Godot may write RamaCycle.zip or RamaCycle.zip.zip depending on template.
+          if [[ ! -f "$ZIP" && -f "${ZIP}.zip" ]]; then ZIP="${ZIP}.zip"; fi
+          unzip -q "$ZIP" -d "$WORK"
+          APP="$(find "$WORK" -maxdepth 1 -name '*.app' -print -quit)"
+          if [[ -z "$APP" ]]; then
+            echo "No .app inside $ZIP" >&2
+            ls -laR "$WORK" >&2
+            exit 1
+          fi
+          if [[ -n "${MACOS_CERTIFICATE:-}" && -n "${MACOS_CERTIFICATE_PASSWORD:-}" ]]; then
+            bash scripts/import_macos_signing_cert.sh
+            bash scripts/sign_macos_app.sh "$APP"
+            if [[ ( -n "${NOTARY_API_KEY:-}" && -n "${NOTARY_API_KEY_ID:-}" && -n "${NOTARY_API_ISSUER:-}" ) \
+               || ( -n "${APPLE_ID:-}" && -n "${APPLE_APP_SPECIFIC_PASSWORD:-}" ) ]]; then
+              bash scripts/notarize_macos_app.sh "$APP"
+            else
+              echo "Signed but skipping notarization — add NOTARY_* or APPLE_ID secrets."
+            fi
+          else
+            echo "Skipping Developer ID sign/notarize — add MACOS_CERTIFICATE secrets (see scripts/export_macos_cert_for_ci.sh)."
+            # Ad-hoc re-sign nested dylib so Gatekeeper at least sees a coherent signature.
+            codesign --force --deep --sign - "$APP" || true
+          fi
+          # Bundle first-run helpers beside the .app
+          cp packaging/FIRST_RUN.txt "$WORK/"
+          cp "packaging/Open RAMA CYCLE.command" "$WORK/"
+          chmod +x "$WORK/Open RAMA CYCLE.command"
+          mkdir -p package-stage
+          (cd "$WORK" && zip -9 -r "$GITHUB_WORKSPACE/package-stage/${{ matrix.artifact }}" .)
+          echo "MAC_PACKAGE=$GITHUB_WORKSPACE/package-stage/${{ matrix.artifact }}" >> "$GITHUB_ENV"
+
       - name: Package artifact
         run: |
           mkdir -p package
           case "${{ matrix.platform }}" in
             macos)
-              cp "dist/macos/${{ matrix.out_name }}" "package/${{ matrix.artifact }}"
+              if [[ -f "${MAC_PACKAGE:-}" ]]; then
+                cp "$MAC_PACKAGE" "package/${{ matrix.artifact }}"
+              elif [[ -f package-stage/${{ matrix.artifact }} ]]; then
+                cp "package-stage/${{ matrix.artifact }}" "package/${{ matrix.artifact }}"
+              else
+                # Fallback: raw Godot zip + helpers
+                WORK="$RUNNER_TEMP/rama-mac-fallback"
+                rm -rf "$WORK" && mkdir -p "$WORK"
+                unzip -q "dist/macos/${{ matrix.out_name }}" -d "$WORK"
+                cp packaging/FIRST_RUN.txt "$WORK/"
+                cp "packaging/Open RAMA CYCLE.command" "$WORK/"
+                chmod +x "$WORK/Open RAMA CYCLE.command"
+                (cd "$WORK" && zip -9 -r "$GITHUB_WORKSPACE/package/${{ matrix.artifact }}" .)
+              fi
               ;;
             linux|deck|lowspec)
               (
                 cd "dist/${{ matrix.platform }}"
+                cp "$GITHUB_WORKSPACE/packaging/FIRST_RUN.txt" .
+                cp "$GITHUB_WORKSPACE/packaging/Run RAMA CYCLE.sh" .
+                chmod +x "Run RAMA CYCLE.sh" RamaCycle.x86_64 2>/dev/null || chmod +x "Run RAMA CYCLE.sh"
                 zip -9 "../../package/${{ matrix.artifact }}" *
               )
               ;;
             windows)
               (
                 cd dist/windows
+                cp "$GITHUB_WORKSPACE/packaging/FIRST_RUN.txt" .
                 if command -v zip >/dev/null 2>&1; then
                   zip -9 "../../package/${{ matrix.artifact }}" *
                 else
@@ -184,11 +249,13 @@ jobs:
             **Controls:** WASD move · mouse look · Space jump · Shift run · dig / install modules · Esc menu
 
             ### Downloads
-            - **macOS** — `RamaCycle-macos.zip` (unzip → right-click → Open the first time)
-            - **Windows** — `RamaCycle-windows.zip`
-            - **Linux** — `RamaCycle-linux.zip`
+            - **macOS** — `RamaCycle-macos.zip` (Developer ID + notarized when CI secrets are set; otherwise use `Open RAMA CYCLE.command` or System Settings → Privacy & Security → Open Anyway)
+            - **Windows** — `RamaCycle-windows.zip` (SmartScreen: More info → Run anyway until reputation builds)
+            - **Linux** — `RamaCycle-linux.zip` (`chmod +x` or use `Run RAMA CYCLE.sh`)
             - **Steam Deck** — `RamaCycle-deck.zip` (Linux + `deck`/`lowspec` quality defaults)
             - **Low Spec** — `RamaCycle-lowspec.zip` (Linux, foliage/LOD cut)
+
+            See `FIRST_RUN.txt` inside each zip.
 
             Site: https://mhsenkow.github.io/ramen/
           files: release/*

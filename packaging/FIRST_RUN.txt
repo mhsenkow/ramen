@@ -1,0 +1,28 @@
+RAMA CYCLE — first run
+======================
+
+macOS
+-----
+Builds are Developer ID signed and notarized when CI secrets are present.
+If Gatekeeper still blocks a downloaded build:
+
+  1. Unzip, then double-click "Open RAMA CYCLE.command"
+     (clears quarantine and launches), OR
+  2. System Settings → Privacy & Security → scroll down → Open Anyway
+
+Windows
+-------
+SmartScreen may say "Windows protected your PC" for unsigned indie builds.
+Click More info → Run anyway. Reputation improves after more downloads.
+
+Linux / Steam Deck / Low Spec
+-----------------------------
+Unzip, then:
+
+  chmod +x RamaCycle.x86_64
+  ./RamaCycle.x86_64
+
+Or double-click "Run RAMA CYCLE.sh".
+
+Site: https://mhsenkow.github.io/ramen/
+Releases: https://github.com/mhsenkow/ramen/releases
