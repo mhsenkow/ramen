@@ -186,20 +186,20 @@ func _ready() -> void:
 
 ## The resolved value of one build axis — the hand-set override if there is one,
 ## otherwise whatever the archetype (and blend) currently make it.
-func _axis(name: String) -> float:
+func _axis(axis_name: String) -> float:
 	var axes: Dictionary = RamaControls.avatar.get("axes", {})
-	if axes.has(name):
-		return float(axes[name])
+	if axes.has(axis_name):
+		return float(axes[axis_name])
 	var spec: Dictionary = RamaBody.make(str(RamaControls.avatar.get("archetype", "daddy")))
 	var to: String = str(RamaControls.avatar.get("blend_to", ""))
 	var mix: float = float(RamaControls.avatar.get("blend", 0.0))
 	if to != "" and mix > 0.001 and RamaBody.ARCHETYPES.has(to):
 		spec = RamaBody.blend(spec, RamaBody.make(to), mix)
-	return float(spec.get(name, 0.5))
+	return float(spec.get(axis_name, 0.5))
 
-func _set_axis(name: String, v: float) -> void:
+func _set_axis(axis_name: String, v: float) -> void:
 	var axes: Dictionary = RamaControls.avatar.get("axes", {})
-	axes[name] = v
+	axes[axis_name] = v
 	RamaControls.avatar["axes"] = axes
 	_apply_build()
 

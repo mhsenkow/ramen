@@ -2,6 +2,7 @@ extends Node3D
 const RamaControls = preload("res://scripts/controls.gd")
 const RamaBody = preload("res://scripts/avatar/body.gd")
 const RamaGait = preload("res://scripts/avatar/gait.gd")
+const RamaTrees = preload("res://scripts/trees.gd")
 ## RAMA CYCLE — MVP-0. The world you can stand in. (REQUIREMENTS.md §G)
 ##
 ## Everything geometric comes from the Rust core (rama_sim). This script places
@@ -141,6 +142,9 @@ var threaded_meshing := true
 var plant_mm: MultiMeshInstance3D
 var plant_mm_mid: MultiMeshInstance3D
 var plant_mm_far: MultiMeshInstance3D
+var woodscape_mm: MultiMeshInstance3D
+var woodscape_refresh_in := 0.0
+var woodscape_owns_near := false
 var soil_overlay: TextureRect
 var soil_mode := 0
 var catchment_cache: PackedFloat32Array = PackedFloat32Array()
@@ -306,6 +310,7 @@ func _ready() -> void:
 	_build_player()
 	_build_mid()
 	_build_plants()
+	_build_woodscape()
 	_build_overlays()
 	_build_panels()
 	player.ghost = _build_ghost()
@@ -555,7 +560,6 @@ func _selftest() -> void:
 	# right order — a body system whose numbers quietly go NaN or whose bear
 	# measures narrower than its twink is worse than one archetype.
 	var b_lines: Array = []
-	var last_sh := -1.0
 	var b_ok := true
 	for arch in RamaBody.ORDER:
 		var spec: Dictionary = RamaBody.make(arch)
@@ -566,7 +570,6 @@ func _selftest() -> void:
 				push_error("body %s: %s is not finite" % [arch, k])
 		b_lines.append("%s %.2fm sh%.2f w%.2f" % [
 			arch.substr(0, 4), float(mm["stature"]), float(mm["sh_w"]), float(mm["waist_w"])])
-		last_sh = float(mm["sh_w"])
 	print("builds              : %s" % " · ".join(b_lines))
 	var jock_v: float = float(RamaBody.measure(RamaBody.make("jock"))["sh_w"]) \
 			/ float(RamaBody.measure(RamaBody.make("jock"))["waist_w"])
@@ -739,21 +742,23 @@ func _new_terrain_material() -> ShaderMaterial:
 func _terrain_material() -> ShaderMaterial:
 	# One shared material for every near chunk — N unique ShaderMaterials was
 	# pure GPU/CPU waste (same uniforms, same shader).
+	# Near must dissolve before mid is fully solid or the two heightfields
+	# z-fight into a dark flickering rectangle (the midground tear).
 	if _chunk_terrain_mat == null:
 		_chunk_terrain_mat = _new_terrain_material()
+		_chunk_terrain_mat.set_shader_parameter("far_cut_start", NEAR_FADE_START)
+		_chunk_terrain_mat.set_shader_parameter("far_cut_end", NEAR_FADE_END)
+		_chunk_terrain_mat.set_shader_parameter("dither_seed", 0.0)
 	return _chunk_terrain_mat
 
 func _far_terrain_material() -> ShaderMaterial:
 	var sm := _new_terrain_material()
-	# Mid hands off around 650–850 m. Far stays fully under mid until then,
-	# so the two dither bands never punch holes through each other.
-	# In before mid is out: see the note on far_cut_start in _build_mid.
-	sm.set_shader_parameter("near_fade_start", 480.0)
-	sm.set_shader_parameter("near_fade_end", 640.0)
+	# Mid retires ~0.44–0.56 of mid_span. Far fades in under that handoff.
+	# Different dither_seed so mid/far never discard the same pixels.
+	sm.set_shader_parameter("near_fade_start", mid_span_eff * 0.40)
+	sm.set_shader_parameter("near_fade_end", mid_span_eff * 0.52)
+	sm.set_shader_parameter("dither_seed", 17.0)
 	sm.set_shader_parameter("haze_start", 90.0)
-	# Extinction distance from the habitat's own size. A fixed 1800 m ramp with
-	# haze_max 0.98 left 2% of the terrain past 1.8 km — in a 6 km drum that is
-	# four kilometres of land washed to one flat colour.
 	sm.set_shader_parameter("haze_scale", float(P["length"]) * 0.40)
 	sm.set_shader_parameter("haze_max", 0.72)
 	return sm
@@ -1047,16 +1052,14 @@ func _build_rivers() -> void:
 func _build_mid() -> void:
 	mid_mi = MeshInstance3D.new()
 	var mat := _new_terrain_material()
-	# Near chunks retire ~120–275 m. Mid stays solid under them, then dissolves
-	# into far past ~650 m — no overlapping dither with the far field.
-	mat.set_shader_parameter("near_fade_start", 105.0)
-	mat.set_shader_parameter("near_fade_end", 175.0)
-	# The far field must be FULLY faded in before mid starts dissolving. It used
-	# to dissolve from 0.42 of the window while far only began at 720 m, so for
-	# ninety metres neither tier was solid and the dither showed the void behind
-	# both — the checkerboard along every distant shoreline.
+	# Hidden only under the near ring; solid by the time near starts dissolving
+	# (NEAR_FADE_START). Different dither_seed from near/far so crossfades
+	# can't punch aligned holes through to the void.
+	mat.set_shader_parameter("near_fade_start", 70.0)
+	mat.set_shader_parameter("near_fade_end", 125.0)
 	mat.set_shader_parameter("far_cut_start", mid_span_eff * 0.44)
 	mat.set_shader_parameter("far_cut_end", mid_span_eff * 0.56)
+	mat.set_shader_parameter("dither_seed", 9.0)
 	mat.set_shader_parameter("haze_start", 150.0)
 	mat.set_shader_parameter("haze_scale", float(P["length"]) * 0.40)
 	mid_mi.material_override = mat
@@ -1233,16 +1236,12 @@ func _build_foam() -> void:
 	mm.transform_format = MultiMesh.TRANSFORM_3D
 	mm.use_colors = true
 	var disk := SphereMesh.new()
-	disk.radius = 0.55
-	disk.height = 0.18
-	disk.radial_segments = 8
-	disk.rings = 3
+	disk.radius = 0.45
+	disk.height = 0.12
+	disk.radial_segments = 12
+	disk.rings = 4
 	mm.mesh = disk
-	mm.instance_count = 1
-	# use_colors defaults instances to opaque WHITE. Park it invisibly until a
-	# refresh assigns real values.
-	mm.set_instance_transform(0, Transform3D(Basis().scaled(Vector3.ZERO), Vector3.ZERO))
-	mm.set_instance_color(0, Color(1, 1, 1, 0))
+	mm.instance_count = 0
 	foam_mm = MultiMeshInstance3D.new()
 	foam_mm.multimesh = mm
 	var mat := StandardMaterial3D.new()
@@ -1250,8 +1249,8 @@ func _build_foam() -> void:
 	mat.vertex_color_use_as_albedo = true
 	mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
 	mat.distance_fade_mode = BaseMaterial3D.DISTANCE_FADE_PIXEL_DITHER
-	mat.distance_fade_min_distance = 70.0
-	mat.distance_fade_max_distance = 140.0
+	mat.distance_fade_min_distance = 55.0
+	mat.distance_fade_max_distance = 110.0
 	foam_mm.material_override = mat
 	foam_mm.name = "ShoreFoam"
 	add_child(foam_mm)
@@ -1261,7 +1260,7 @@ func _refresh_foam() -> void:
 		return
 	# Prefer thin shore (0.12–0.9 m) so Multimesh foam sits on the contact
 	# line that the depth-shore shader already paints.
-	var pts: PackedFloat32Array = terrain.shore_points(player.theta, player.z, 140.0, 220)
+	var pts: PackedFloat32Array = terrain.shore_points(player.theta, player.z, 110.0, 140)
 	var n: int = int(pts.size() / 3.0)
 	if n < 1:
 		foam_mm.multimesh.instance_count = 0
@@ -1274,13 +1273,12 @@ func _refresh_foam() -> void:
 		var gr: float = terrain.ground_radius(th, zz)
 		var r: float = gr - dep * 0.95
 		var xf := frame_at(th, zz, r)
-		# Flatter, wider discs along the waterline.
-		var s: float = clampf(1.05 + (1.0 - clampf(dep / 1.2, 0.0, 1.0)) * 1.15, 0.85, 3.0)
-		xf.basis = xf.basis.scaled(Vector3(s, 0.18, s))
+		# Keep discs small — oversized foam read as white hex plates in air.
+		var s: float = clampf(0.7 + (1.0 - clampf(dep / 1.2, 0.0, 1.0)) * 0.7, 0.55, 1.55)
+		xf.basis = xf.basis.scaled(Vector3(s, 0.14, s))
 		foam_mm.multimesh.set_instance_transform(i, xf)
 		var edge: float = 1.0 - clampf(abs(dep - 0.35) / 0.55, 0.0, 1.0)
-		var a: float = clampf(0.22 + edge * 0.58, 0.18, 0.78)
-		# Wet sand halo — cooler than dry bank foam (Wave 6).
+		var a: float = clampf(0.16 + edge * 0.45, 0.12, 0.58)
 		var wet := Color(0.68, 0.76, 0.72, a * 0.9)
 		var dry := Color(0.92, 0.97, 1.0, a)
 		foam_mm.multimesh.set_instance_color(i, wet.lerp(dry, clampf(dep / 0.9, 0.0, 1.0)))
@@ -1818,7 +1816,7 @@ func refresh_agents() -> void:
 			agent_rigs[j]["id"] = -1
 
 ## Give a pool slot to a colonist, rebuilding the rig only when the man changes.
-func _seat_agent_rig(slot: int, id: int, arch: String, th: float, zz: float, tint: Color) -> void:
+func _seat_agent_rig(slot: int, id: int, arch: String, th: float, zz: float, _tint: Color) -> void:
 	var e: Dictionary = agent_rigs[slot]
 	if int(e["id"]) != id:
 		e["id"] = id
@@ -2150,26 +2148,24 @@ func _build_steam() -> void:
 	mm.transform_format = MultiMesh.TRANSFORM_3D
 	mm.use_colors = true
 	var puff := SphereMesh.new()
-	puff.radius = 0.35
-	puff.height = 0.55
-	puff.radial_segments = 6
-	puff.rings = 3
+	puff.radius = 0.28
+	puff.height = 0.40
+	puff.radial_segments = 12
+	puff.rings = 6
 	mm.mesh = puff
-	mm.instance_count = 16
-	# use_colors defaults every instance to opaque WHITE. Any MultiMesh that
-	# sets instance_count at build but assigns colours only on refresh renders
-	# as white boxes until that refresh runs.
-	for i in mm.instance_count:
-		mm.set_instance_transform(i, Transform3D(Basis().scaled(Vector3.ZERO), Vector3.ZERO))
-		mm.set_instance_color(i, Color(0.90, 0.94, 0.97, 0.0))
+	mm.instance_count = 0
 	steam_mm = MultiMeshInstance3D.new()
 	steam_mm.multimesh = mm
 	var mat := StandardMaterial3D.new()
 	mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
 	mat.vertex_color_use_as_albedo = true
 	mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	mat.distance_fade_mode = BaseMaterial3D.DISTANCE_FADE_PIXEL_DITHER
+	mat.distance_fade_min_distance = 18.0
+	mat.distance_fade_max_distance = 42.0
 	steam_mm.material_override = mat
 	steam_mm.visible = false
+	steam_mm.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 	steam_mm.name = "DawnSteam"
 	add_child(steam_mm)
 
@@ -3035,192 +3031,134 @@ func place_module(p: Vector3, kind: int, from_save: bool = false) -> void:
 	modules.append(node)
 
 func _build_plants() -> void:
-	# Six archetypes × three LOD tiers. Genome picks silhouette; biome biases
-	# colour (Wave 5).
+	# Eight growth algorithms × near/mid LOD. Each mesh is a full recursive
+	# branching tree (block vocabulary, natural forks). Excavate trunks for timber.
 	plant_species_near = []
 	plant_species_mid = []
-	for kind in 6:
-		var near := _make_plant_layer("PlantsNear_%d" % kind, _make_species_mesh(kind, 1.0), 95.0, 190.0)
-		# Only the near tier casts — mid/far shadow cascades crushed the ground.
+	for kind in 8:
+		var near_mesh: ArrayMesh = RamaTrees.mesh_for(kind, 1.0, kind * 104729 + 17)
+		var mid_mesh: ArrayMesh = RamaTrees.mesh_for(kind, 0.78, kind * 104729 + 91)
+		var near := _make_plant_layer("PlantsNear_%d" % kind, near_mesh, 120.0, 240.0)
 		near.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
+		if near.material_override is ShaderMaterial:
+			near.material_override.set_shader_parameter("model_height", RamaTrees.TREE_H)
+			near.material_override.set_shader_parameter("sway", 0.045)
 		plant_species_near.append(near)
-		var mid := _make_plant_layer("PlantsMid_%d" % kind, _make_species_mesh(kind, 0.72), 170.0, 300.0)
+		var mid := _make_plant_layer("PlantsMid_%d" % kind, mid_mesh, 200.0, 360.0)
 		mid.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
-		# LOD shade match — same fill energy as near (Wave 5).
 		if mid.material_override is ShaderMaterial:
-			mid.material_override.set_shader_parameter("sway", 0.06)
+			mid.material_override.set_shader_parameter("model_height", RamaTrees.TREE_H * 0.78)
+			mid.material_override.set_shader_parameter("sway", 0.03)
 		plant_species_mid.append(mid)
-	# Far LOD stays one billboard layer (silhouette only at range).
-	plant_mm_far = _make_plant_layer("PlantsFar", _make_billboard_mesh(), 280.0, 450.0)
+	plant_mm_far = _make_plant_layer("PlantsFar", RamaTrees.billboard_mesh(), 320.0, 520.0)
 	plant_mm_far.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 	if plant_mm_far.material_override is ShaderMaterial:
 		plant_mm_far.material_override.set_shader_parameter("sway", 0.0)
-	# Keep legacy aliases pointing at conifer near/mid for any old callers.
+		plant_mm_far.material_override.set_shader_parameter("model_height", 4.0)
 	plant_mm = plant_species_near[0]
 	plant_mm_mid = plant_species_mid[0]
 	_refresh_plants()
 
-## Species from plants_lod kind field (0 conifer, 1 broadleaf, 2 willow, 3 scrub, 4 reed, 5 orchard).
-func _biome_species(bid: int, genome: int = -1) -> int:
-	if genome >= 0:
-		return clampi(genome % 6, 0, 5)
+## Minecraft-style connected wood/leaf cubes. Same grid → faces combine.
+func _build_woodscape() -> void:
+	var st := SurfaceTool.new()
+	st.begin(Mesh.PRIMITIVE_TRIANGLES)
+	# Unit cube centred on origin; instance transform places it.
+	var e := 0.54
+	_add_prism(st, Vector3.ZERO, Vector3(e, e, e), Color(1, 1, 1, 1))
+	st.generate_normals()
+	var mesh := st.commit()
+	var mm := MultiMesh.new()
+	mm.transform_format = MultiMesh.TRANSFORM_3D
+	mm.use_colors = true
+	# CUSTOM.x carries how far up its own crown a block sits. A lone instanced
+	# cube has no local height for the shader to read, so without this every
+	# block shades as ground contact — a uniformly dark, swayless forest.
+	mm.use_custom_data = true
+	mm.mesh = mesh
+	mm.instance_count = 0
+	woodscape_mm = MultiMeshInstance3D.new()
+	woodscape_mm.multimesh = mm
+	var mat := ShaderMaterial.new()
+	mat.shader = load("res://shaders/tree.gdshader")
+	mat.set_shader_parameter("haze_start", 80.0)
+	mat.set_shader_parameter("haze_end", 420.0)
+	mat.set_shader_parameter("fade_start", 70.0)
+	mat.set_shader_parameter("fade_end", 130.0)
+	mat.set_shader_parameter("sway", 0.02)
+	# Crown height comes from instance data, not from the cube's own vertices.
+	mat.set_shader_parameter("up_from_instance", true)
+	woodscape_mm.material_override = mat
+	woodscape_mm.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
+	woodscape_mm.name = "Woodscape"
+	add_child(woodscape_mm)
+	woodscape_refresh_in = 0.05
+
+## Voxel stands stream within this radius — matched to the sim's near plant
+## tier (`plants_lod` r_near) so the blocks replace exactly the Multimesh trees
+## that `_hide_near_trees` switches off, with no band left empty between them.
+const WOODSCAPE_RADIUS := 92.0
+const WOODSCAPE_LIMIT := 12000
+## Bark and foliage keys for `tree.gdshader`. RGB is a luminance ratio the
+## shader multiplies into `bark_tint` (alpha 0) or reads as pigment (alpha 1),
+## so these track the near-tree instance colours; a plain white wood key came
+## out as 3.5x bark and read as glowing orange cubes.
+const WOOD_KEY := Color(0.30, 0.28, 0.26, 0.0)
+const LEAF_KEY := Color(0.16, 0.44, 0.22, 1.0)
+
+func refresh_woodscape(force := false) -> void:
+	if woodscape_mm == null or player == null or terrain == null:
+		return
+	if not force and woodscape_refresh_in > 0.0:
+		return
+	woodscape_refresh_in = 0.22
+	var feet: Vector3 = player.feet_pos() if player.has_method("feet_pos") else player.global_position
+	var src: PackedFloat32Array = terrain.woodscape_lod(
+			feet.x, feet.y, feet.z, WOODSCAPE_RADIUS, WOODSCAPE_LIMIT)
+	var n: int = int(src.size() / 5.0)
+	var mm: MultiMesh = woodscape_mm.multimesh
+	if n < 1:
+		mm.instance_count = 0
+		_hide_near_trees(0)
+		return
+	mm.instance_count = n
+	for i in n:
+		var s: int = i * 5
+		mm.set_instance_transform(i, Transform3D(Basis.IDENTITY,
+				Vector3(src[s], src[s + 1], src[s + 2])))
+		mm.set_instance_color(i, WOOD_KEY if int(src[s + 3]) == 1 else LEAF_KEY)
+		# How far up its own crown this block sits — see `up_from_instance`.
+		mm.set_instance_custom_data(i, Color(src[s + 4], 0.0, 0.0, 0.0))
+	_hide_near_trees(n)
+
+## One vocabulary at close range: where voxel stands are resident, the near
+## Multimesh trees stand down. Hysteresis on the count, because the threshold
+## sits right where a stand streams in and a bare comparison flickered the
+## whole near tier on and off as you walked.
+func _hide_near_trees(blocks: int) -> void:
+	if blocks > 240:
+		woodscape_owns_near = true
+	elif blocks < 60:
+		woodscape_owns_near = false
+	for mi in plant_species_near:
+		if mi:
+			mi.visible = not woodscape_owns_near
+
+## Form id from plants_lod (0 conifer … 7 giant). Biome fallback if kind absent.
+func _biome_species(bid: int, kind: int = -1) -> int:
+	if kind >= 0:
+		return clampi(kind, 0, 7)
 	match bid:
-		5: return 0          # forest → conifer fallback
-		1, 2, 9: return 2    # wetland / riparian / swamp → willow
-		4, 6, 7, 11, 12: return 3  # scrub / alpine / rock / desert / dune → scrub
-		13: return 4         # shore → reed sparse
-		10: return 1         # meadow → broadleaf
-		_: return 1          # grassland / farm / water edge → broadleaf
+		5: return 0
+		1, 2, 9: return 2
+		4, 6, 7, 11, 12: return 3
+		13: return 4
+		10: return 1
+		8: return 5
+		_: return 1
 
-## Source-mesh colour convention for anything drawn with `tree.gdshader`.
-##
-## A MultiMesh instance colour MULTIPLIES the source mesh's vertex colour, and
-## the shader then raises the product to 1.95. A mesh that bakes its own leaf
-## green therefore lands at a hundredth of the value it was authored at — and a
-## brown trunk multiplied by a green leaf lands at zero. That was the crop of
-## black sticks standing in every meadow.
-##
-## So RGB carries a luminance RATIO around 1.0 and the instance colour carries
-## the hue; ALPHA is a material key the shader reads: 0 wood, 0.5 fruit, 1 leaf.
-## Wood and fruit are the two hues a per-instance leaf colour can never make, so
-## they are named in the shader instead of baked in here.
-static func _leaf(shade: float) -> Color:
-	return Color(shade, shade, shade, 1.0)
-
-static func _wood(shade: float) -> Color:
-	return Color(shade, shade, shade, 0.0)
-
-static func _fruit(shade: float) -> Color:
-	return Color(shade, shade, shade, 0.5)
-
-func _make_species_mesh(kind: int, detail: float) -> ArrayMesh:
-	match kind:
-		0: return _make_conifer_mesh(detail)
-		2: return _make_willow_mesh(detail)
-		3: return _make_scrub_mesh(detail)
-		4: return _make_reed_mesh(detail)
-		5: return _make_orchard_mesh(detail)
-		_: return _make_broadleaf_mesh(detail)
-
-func _make_conifer_mesh(detail: float) -> ArrayMesh:
-	var st := SurfaceTool.new()
-	st.begin(Mesh.PRIMITIVE_TRIANGLES)
-	var trunk_h := 1.15
-	_add_prism(st, Vector3(0, trunk_h * 0.40, 0), Vector3(0.12, trunk_h * 0.80, 0.12),
-			_wood(1.0))
-	var layers: int = 4 if detail > 0.85 else 3
-	for li in layers:
-		var t: float = float(li) / float(max(layers - 1, 1))
-		var y: float = trunk_h * 0.55 + t * 1.15 * detail
-		var rad: float = (0.85 - t * 0.62) * detail
-		var h: float = (0.48 - t * 0.06) * detail
-		_add_prism(st, Vector3(0, y, 0), Vector3(rad, h, rad), _leaf(0.84 + t * 0.30))
-	_add_prism(st, Vector3(0, trunk_h * 0.55 + 1.25 * detail, 0),
-			Vector3(0.14 * detail, 0.22 * detail, 0.14 * detail),
-			_leaf(1.18))
-	st.generate_normals()
-	return st.commit()
-
-func _make_broadleaf_mesh(detail: float) -> ArrayMesh:
-	var st := SurfaceTool.new()
-	st.begin(Mesh.PRIMITIVE_TRIANGLES)
-	var trunk_h := 1.0
-	_add_prism(st, Vector3(0, trunk_h * 0.38, 0), Vector3(0.14, trunk_h * 0.76, 0.14),
-			_wood(1.0))
-	_add_prism(st, Vector3(0, trunk_h * 0.82, 0), Vector3(0.09, trunk_h * 0.28, 0.09),
-			_wood(0.86))
-	var layers: int = 3 if detail > 0.85 else 2
-	var base_y := trunk_h * 0.72
-	for li in layers:
-		var t: float = float(li) / float(max(layers - 1, 1))
-		var y: float = base_y + t * 0.95 * detail
-		var rad: float = (0.72 - t * 0.38) * detail
-		var h: float = (0.42 - t * 0.08) * detail
-		_add_prism(st, Vector3(0, y, 0), Vector3(rad, h, rad), _leaf(0.86 + t * 0.28))
-		if detail > 0.85 and li == 0:
-			_add_prism(st, Vector3(rad * 0.35, y - 0.05, rad * 0.15),
-					Vector3(rad * 0.55, h * 0.7, rad * 0.55),
-					_leaf(0.93))
-	_add_prism(st, Vector3(0, base_y + 1.05 * detail, 0),
-			Vector3(0.18 * detail, 0.28 * detail, 0.18 * detail),
-			_leaf(1.16))
-	st.generate_normals()
-	return st.commit()
-
-func _make_willow_mesh(detail: float) -> ArrayMesh:
-	var st := SurfaceTool.new()
-	st.begin(Mesh.PRIMITIVE_TRIANGLES)
-	_add_prism(st, Vector3(0, 0.55, 0), Vector3(0.10, 1.1, 0.10), _wood(1.05))
-	# Drooping lobes — wider than tall, hanging off a short trunk.
-	for i in 3:
-		var a: float = float(i) * TAU / 3.0
-		var ox := cos(a) * 0.35 * detail
-		var oz := sin(a) * 0.35 * detail
-		_add_prism(st, Vector3(ox, 0.95 + float(i % 2) * 0.15, oz),
-				Vector3(0.55 * detail, 0.70 * detail, 0.55 * detail),
-				_leaf(0.92 + float(i % 2) * 0.12))
-	_add_prism(st, Vector3(0, 1.35 * detail, 0), Vector3(0.40 * detail, 0.35 * detail, 0.40 * detail),
-			_leaf(1.14))
-	st.generate_normals()
-	return st.commit()
-
-func _make_scrub_mesh(detail: float) -> ArrayMesh:
-	var st := SurfaceTool.new()
-	st.begin(Mesh.PRIMITIVE_TRIANGLES)
-	# Low multi-stem bush — no tall trunk.
-	for i in 4:
-		var a: float = float(i) * 1.7
-		var ox := cos(a) * 0.22 * detail
-		var oz := sin(a) * 0.22 * detail
-		_add_prism(st, Vector3(ox, 0.28 * detail, oz),
-				Vector3(0.18 * detail, 0.55 * detail, 0.18 * detail),
-				_wood(1.15))
-	_add_prism(st, Vector3(0, 0.55 * detail, 0),
-			Vector3(0.55 * detail, 0.45 * detail, 0.55 * detail),
-			_leaf(1.05))
-	st.generate_normals()
-	return st.commit()
-
-func _make_reed_mesh(detail: float) -> ArrayMesh:
-	var st := SurfaceTool.new()
-	st.begin(Mesh.PRIMITIVE_TRIANGLES)
-	for i in 5:
-		var a: float = float(i) * 1.25
-		var ox := cos(a) * 0.12 * detail
-		var oz := sin(a) * 0.12 * detail
-		var h: float = (0.9 + float(i % 3) * 0.25) * detail
-		_add_prism(st, Vector3(ox, h * 0.5, oz), Vector3(0.05, h, 0.05),
-				_leaf(0.90 + float(i % 3) * 0.10))
-		# Seed head — straw, which is nearer wood than leaf.
-		_add_prism(st, Vector3(ox, h + 0.08, oz), Vector3(0.08, 0.12, 0.08),
-				_wood(1.55))
-	st.generate_normals()
-	return st.commit()
-
-func _make_orchard_mesh(detail: float) -> ArrayMesh:
-	var st := SurfaceTool.new()
-	st.begin(Mesh.PRIMITIVE_TRIANGLES)
-	_add_prism(st, Vector3(0, 0.55, 0), Vector3(0.11, 1.1, 0.11), _wood(1.0))
-	_add_prism(st, Vector3(0, 1.15 * detail, 0), Vector3(0.55 * detail, 0.55 * detail, 0.55 * detail),
-			_leaf(1.0))
-	_add_prism(st, Vector3(0.25 * detail, 1.05 * detail, 0.1), Vector3(0.28 * detail, 0.28 * detail, 0.28 * detail),
-			_fruit(0.95))
-	_add_prism(st, Vector3(-0.2 * detail, 1.2 * detail, -0.12), Vector3(0.22 * detail, 0.22 * detail, 0.22 * detail),
-			_fruit(1.12))
-	st.generate_normals()
-	return st.commit()
-
-func _make_tree_mesh(detail: float) -> ArrayMesh:
-	return _make_broadleaf_mesh(detail)
-
-func _make_billboard_mesh() -> ArrayMesh:
-	var st := SurfaceTool.new()
-	st.begin(Mesh.PRIMITIVE_TRIANGLES)
-	# Soft diamond silhouette for far LOD — less "playing-card forest".
-	_add_quad(st, Vector3(0, 0.55, 0), Vector3(1.1, 1.1, 0.05), _leaf(0.92))
-	_add_quad(st, Vector3(0, 0.85, 0), Vector3(0.7, 0.7, 0.04), _leaf(1.06))
-	st.generate_normals()
-	return st.commit()
+## Tree meshes live in `trees.gd` (RamaTrees) — recursive blocky branching.
+## Vertex colour convention for tree.gdshader is documented there.
 
 func _add_prism(st: SurfaceTool, center: Vector3, size: Vector3, col: Color) -> void:
 	var hx := size.x * 0.5
@@ -3242,20 +3180,6 @@ func _add_prism(st: SurfaceTool, center: Vector3, size: Vector3, col: Color) -> 
 		for idx in f:
 			st.set_color(col)
 			st.add_vertex(corners[idx])
-
-func _add_quad(st: SurfaceTool, center: Vector3, size: Vector3, col: Color) -> void:
-	var hx := size.x * 0.5
-	var hy := size.y * 0.5
-	var hz := size.z * 0.5
-	var p := [
-		center + Vector3(-hx, -hy, -hz),
-		center + Vector3(hx, -hy, -hz),
-		center + Vector3(hx, hy, hz),
-		center + Vector3(-hx, hy, hz),
-	]
-	for idx in [0, 1, 2, 0, 2, 3]:
-		st.set_color(col)
-		st.add_vertex(p[idx])
 
 func _make_plant_layer(layer_name: String, mesh: Mesh, fade_min: float, fade_max: float) -> MultiMeshInstance3D:
 	var mm := MultiMesh.new()
@@ -3310,7 +3234,7 @@ func _refresh_plants() -> void:
 	# Buckets: [lod][species] → index list
 	var buckets: Array = []
 	for _lod in 3:
-		var sp: Array = [[], [], [], [], [], []]
+		var sp: Array = [[], [], [], [], [], [], [], []]
 		buckets.append(sp)
 	var n: int = int(plant_data.size() / float(stride))
 	for i in n:
@@ -3320,12 +3244,12 @@ func _refresh_plants() -> void:
 		var genome: int = int(plant_data[base + 7]) if stride >= 8 else -1
 		var sp: int = _biome_species(bid, genome)
 		buckets[lod][sp].append(i)
-	for sp in 6:
+	for sp in 8:
 		_fill_plant_bucket(plant_species_near[sp], plant_data, buckets[0][sp], 1.0, stride)
 		_fill_plant_bucket(plant_species_mid[sp], plant_data, buckets[1][sp], 1.25, stride)
 	# Far: merge all species into one billboard layer.
 	var far_idx: Array = []
-	for sp in 6:
+	for sp in 8:
 		far_idx.append_array(buckets[2][sp])
 	_fill_plant_bucket(plant_mm_far, plant_data, far_idx, 1.7, stride)
 
@@ -3336,27 +3260,45 @@ func _plant_instance_xform(data: PackedFloat32Array, i: int, scale_boost: float,
 	var stem: float = data[base + 2]
 	var leaf: float = data[base + 3]
 	var bid: int = clampi(int(data[base + 6]), 0, BIOME_PLANT_COL.size() - 1)
-	var genome: int = int(data[base + 7]) if stride >= 8 else -1
-	var sp: int = _biome_species(bid, genome)
+	var kind: int = int(data[base + 7]) if stride >= 8 else -1
+	var sp: int = _biome_species(bid, kind)
 	var gr: float = terrain.ground_radius(th, zz)
-	var h: float = clampf(0.55 + stem * 3.8 + leaf * 1.2, 0.7, 7.5) * scale_boost
-	# Scrub / reed stay short.
+	# Target height metres — saplings ~6 m, canopy giants ~35 m+.
+	var h: float = clampf(6.0 + stem * 38.0 + leaf * 10.0, 5.5, 36.0) * scale_boost
 	if sp == 3 or sp == 4:
-		h = clampf(0.4 + stem * 1.2 + leaf * 0.6, 0.35, 2.4) * scale_boost
-	if sp == 5:
-		h = clampf(0.7 + stem * 2.2 + leaf * 0.8, 0.8, 4.0) * scale_boost
+		h = clampf(0.9 + stem * 3.0 + leaf * 1.5, 0.7, 3.8) * scale_boost
+	elif sp == 5:
+		h = clampf(3.5 + stem * 14.0 + leaf * 4.0, 3.0, 12.0) * scale_boost
+	elif sp == 6:
+		h = clampf(7.0 + stem * 28.0 + leaf * 8.0, 6.0, 28.0) * scale_boost
+	elif sp == 7:
+		h = clampf(12.0 + stem * 42.0 + leaf * 12.0, 10.0, 42.0) * scale_boost
 	var xf := frame_at(th, zz, gr)
 	var jit: float = fposmod(sin(th * 733.1 + zz * 41.7) * 43758.5453, 1.0)
 	var jit2: float = fposmod(sin(th * 191.3 - zz * 97.1) * 24634.6345, 1.0)
 	xf.basis = xf.basis.rotated(xf.basis.y, jit * TAU)
-	xf.basis = xf.basis.rotated(xf.basis.z, (jit2 - 0.5) * 0.28)
-	xf.basis = xf.basis.rotated(xf.basis.x, (jit - 0.5) * 0.12)
-	var w: float = (0.55 + leaf * 1.05) * scale_boost * (0.78 + jit2 * 0.52)
+	# Mild spinward lean — taller trees tip toward +theta (drum rotation).
+	var spin_lean: float = (0.035 + stem * 0.04) * (0.7 + jit * 0.6)
+	if sp == 6:
+		spin_lean *= 1.8
+	xf.basis = xf.basis.rotated(xf.basis.z, spin_lean)
+	xf.basis = xf.basis.rotated(xf.basis.x, (jit - 0.5) * 0.06)
+	var w: float = (1.0 + leaf * 0.55 + stem * 0.45) * scale_boost * (0.88 + jit2 * 0.28)
 	if sp == 3:
-		w *= 1.35
-	if sp == 4:
-		w *= 0.55
-	xf.basis = xf.basis.scaled(Vector3(w, h * (0.82 + jit * 0.40), w))
+		w *= 1.2
+	elif sp == 4:
+		w *= 0.5
+	elif sp == 6:
+		w *= 1.4
+	elif sp == 7:
+		w *= 1.55
+	var mesh_h: float = RamaTrees.TREE_H
+	if sp == 3 or sp == 4:
+		mesh_h = 3.0
+	elif sp == 5:
+		mesh_h = RamaTrees.TREE_H * 0.55
+	var s: float = h / mesh_h
+	xf.basis = xf.basis.scaled(Vector3(w * s, s, w * s))
 	return xf
 
 func _plant_instance_color(data: PackedFloat32Array, i: int, stride: int = PLANT_STRIDE) -> Color:
@@ -3450,6 +3392,9 @@ func _process(_dt: float) -> void:
 	_tick_biosphere(_dt)
 	_tick_deferred_visuals()
 	_tick_plant_fill()
+	woodscape_refresh_in = maxf(woodscape_refresh_in - _dt, 0.0)
+	if woodscape_refresh_in <= 0.0:
+		refresh_woodscape()
 	_tick_catchment(_dt)
 	_tick_splash(_dt)
 	_tick_catchment_pulse(_dt)
@@ -3636,6 +3581,15 @@ func _maybe_queue_plants() -> void:
 	plant_fill_j = 0
 	plant_indices = []
 	plant_refresh_due = true
+
+## Immediate Multimesh rebuild after felling — don't wait for the next sim census.
+func force_plant_refresh() -> void:
+	last_plants_alive = -1
+	plant_refresh_due = false
+	_refresh_plants()
+	if terrain != null:
+		last_plants_alive = int(terrain.plant_count())
+		last_sim["plants"] = last_plants_alive
 
 func _tick_plant_fill() -> void:
 	if not plant_refresh_due:
@@ -3888,6 +3842,7 @@ func _build_hud() -> void:
 	you.add_row("pos", "position")
 	you.add_row("elev", "elevation")
 	you.add_row("pack", "pack", true)
+	you.add_row("carry", "carrying")
 	you.add_row("enc", "encumbrance", true)
 	you.add_row("home", "home")
 
@@ -4054,10 +4009,22 @@ func _push_hud(e: float, fx: float, heavy: bool = true) -> void:
 
 	var pk: Dictionary = terrain.inventory()
 	var kg: float = float(pk.get("mass_kg", 0.0))
-	var maxkg: float = maxf(float(pk.get("max_mass_kg", 60.0)), 1.0)
+	var maxkg: float = maxf(float(pk.get("max_mass_kg", 90.0)), 1.0)
 	var vfrac: float = float(pk.get("volume_frac", 0.0))
 	ui.put("you", "pack", "%.1f / %.0f kg  ·  %d%% vol" % [kg, maxkg, int(vfrac * 100.0)],
 			maxf(kg / maxkg, vfrac))
+	# Top stack so timber / clay reads as what you are carrying, not just weight.
+	var top := ""
+	var top_kg := 0.0
+	for s in pk.get("stacks", []):
+		var sk: float = float(s.get("mass_kg", 0.0))
+		if sk > top_kg:
+			top_kg = sk
+			top = str(s.get("name", "?"))
+	if top_kg > 0.05:
+		ui.put("you", "carry", "%.0f kg %s" % [top_kg, top], top_kg / maxkg)
+	else:
+		ui.put("you", "carry", "empty")
 	# Encumbrance is a movement MULTIPLIER, so show the penalty, not the value.
 	var encm: float = float(pk.get("encumbrance", 1.0))
 	ui.put("you", "enc", "%d%% speed" % int(encm * 100.0), 1.0 - clampf(encm, 0.0, 1.0))
@@ -4294,27 +4261,23 @@ func _tick_daylight(dt: float) -> void:
 		var base: Vector3 = player.feet_pos()
 		var steam_up := Vector3(-base.x, -base.y, 0.0).normalized()
 		var wdep: float = terrain.water_depth_at(player.theta, player.z)
-		var a := 0.14 + 0.30 * clampf(steam_life / 4.5, 0.0, 1.0) * (0.4 + wdep)
-		var steam_x: Array[Transform3D] = []
-		var steam_c: Array[Color] = []
-		steam_x.resize(16)
-		steam_c.resize(16)
-		for i in 16:
-			var ang: float = float(i) / 16.0 * TAU + clock * 0.4
-			var lateral := Vector3(cos(ang), sin(ang), sin(ang * 1.7) * 0.3)
+		# Soft mist, not white hex plates in front of the camera.
+		var a := 0.06 + 0.14 * clampf(steam_life / 4.5, 0.0, 1.0) * (0.35 + minf(wdep, 1.0))
+		const STEAM_N := 12
+		steam_mm.multimesh.instance_count = STEAM_N
+		for i in STEAM_N:
+			var ang: float = float(i) / float(STEAM_N) * TAU + clock * 0.35
+			var lateral := Vector3(cos(ang), sin(ang), sin(ang * 1.7) * 0.25)
 			lateral = (lateral - steam_up * lateral.dot(steam_up)).normalized()
-			var loft: float = 0.4 + float(i % 5) * 0.35 + (4.5 - steam_life) * 0.15
-			var xf := Transform3D(Basis.IDENTITY, base + lateral * (1.2 + i * 0.35) + steam_up * loft)
-			var s: float = 0.6 + (i % 3) * 0.25
-			xf.basis = xf.basis.scaled(Vector3(s, s * 1.3, s))
-			steam_x[i] = xf
-			steam_c[i] = Color(0.85, 0.88, 0.92, a)
-		steam_mm.multimesh.instance_count = 16
-		for i in 16:
-			steam_mm.multimesh.set_instance_transform(i, steam_x[i])
-			steam_mm.multimesh.set_instance_color(i, steam_c[i])
+			var loft: float = 0.25 + float(i % 4) * 0.18 + (4.5 - steam_life) * 0.08
+			var xf := Transform3D(Basis.IDENTITY, base + lateral * (0.8 + i * 0.22) + steam_up * loft)
+			var s: float = 0.35 + (i % 3) * 0.12
+			xf.basis = xf.basis.scaled(Vector3(s, s * 1.15, s))
+			steam_mm.multimesh.set_instance_transform(i, xf)
+			steam_mm.multimesh.set_instance_color(i, Color(0.88, 0.91, 0.94, a))
 	elif steam_mm:
 		steam_mm.visible = false
+		steam_mm.multimesh.instance_count = 0
 
 # ----------------------------------------------------------- hud panels --
 
@@ -4707,6 +4670,14 @@ func _take_shots() -> void:
 	await get_tree().process_frame
 	RenderingServer.force_draw()
 	await get_tree().process_frame
+	var shot_dir := ProjectSettings.globalize_path("res://../shots")
+	var shot_only := PackedStringArray()
+	for arg in OS.get_cmdline_user_args():
+		if arg.begins_with("--shot-dir="):
+			shot_dir = arg.trim_prefix("--shot-dir=")
+		elif arg.begins_with("--shot-only="):
+			shot_only = arg.trim_prefix("--shot-only=").split(",")
+	DirAccess.make_dir_recursive_absolute(shot_dir)
 	var shots := [
 		{"name": "01_wake", "pitch": -0.05, "yaw": 0.0, "h": 0.6},
 		{"name": "02_stand", "pitch": 0.02, "yaw": 0.0, "h": 1.72},
@@ -4727,6 +4698,8 @@ func _take_shots() -> void:
 		{"name": "12_place", "pitch": 0.0, "h": 1.72, "dwell": 2, "standoff": 34.0, "hud": true},
 	]
 	for s in shots:
+		if not shot_only.is_empty() and str(s["name"]) not in shot_only:
+			continue
 		if s.get("soak", false):
 			# Let people actually arrive before photographing where they live.
 			for i in 24:
@@ -4844,7 +4817,7 @@ func _take_shots() -> void:
 		await RenderingServer.frame_post_draw
 		await RenderingServer.frame_post_draw
 		var img := get_viewport().get_texture().get_image()
-		var path := "/Users/powerox/ramen/shots/%s.png" % s["name"]
+		var path := shot_dir.path_join("%s.png" % s["name"])
 		img.save_png(path)
 		# Screenshot metadata (§2120): seed, position, date beside the PNG.
 		var meta := {
@@ -4857,7 +4830,7 @@ func _take_shots() -> void:
 			"clock": clock,
 			"date": Time.get_datetime_string_from_system(true),
 		}
-		var mf := FileAccess.open("/Users/powerox/ramen/shots/%s.json" % s["name"], FileAccess.WRITE)
+		var mf := FileAccess.open(shot_dir.path_join("%s.json" % s["name"]), FileAccess.WRITE)
 		if mf:
 			mf.store_string(JSON.stringify(meta))
 			mf.close()

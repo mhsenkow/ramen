@@ -40,6 +40,11 @@ func _draw() -> void:
 	var txt := "%s   %.1f m" % [kind, dist]
 	if not p.can_dig:
 		txt += "   (cannot excavate)"
+	# Spoil / timber heaps at your feet — L takes them into the pack. Sampled
+	# by _refresh_aim; _draw must stay off the sim's FFI surface.
+	var heap: Dictionary = aim.get("heap", {})
+	if heap.get("ok", false):
+		txt += "   ·  L take %.0f kg %s" % [float(heap.get("kg", 0.0)), str(heap.get("material", "?"))]
 	var f := ThemeDB.fallback_font
 	var w := f.get_string_size(txt, HORIZONTAL_ALIGNMENT_LEFT, -1, 12).x
 	# Outline for readability.

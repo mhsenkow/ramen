@@ -31,6 +31,7 @@ mod sph;
 mod terrain;
 mod trophic;
 mod weather;
+mod woodscape;
 
 #[allow(unused_imports)]
 use habitat::Habitat;
@@ -42,7 +43,8 @@ use biosphere::Biosphere;
 use terrain::Terrain;
 use weather::Weather;
 
-/// Map biome + climate → plant species id (0–5) for Multimesh archetypes.
+/// Map biome + climate + genome → plant form id (0–7) for Multimesh archetypes.
+/// 0 conifer, 1 broadleaf, 2 willow, 3 scrub, 4 reed, 5 orchard, 6 acacia, 7 giant.
 fn forest_kind(
     bid: u8,
     weather: &Weather,
@@ -54,7 +56,8 @@ fn forest_kind(
     let elev = ter.elevation(theta, z);
     let arid = weather.aridity_at(theta, z);
     let temp = weather.temp_at_elev(theta, z, elev);
-    let g = genome % 6;
+    let g = genome;
+    let form = (g % 8) as u8;
     let prov = province::province_at(&ter.hab, theta, z);
     if prov.weight(province::id::CITY) > 0.45 {
         // Street trees / plaza orphans — scrub + rare orchard.
@@ -68,34 +71,55 @@ fn forest_kind(
             if elev > ter.hab.max_elevation * 0.42 || temp < 9.0 {
                 0 // montane conifer
             } else if arid > 0.48 {
-                3 // dry scrub-forest edge
-            } else if g % 3 == 0 {
-                0
+                if form % 3 == 0 {
+                    6
+                } else {
+                    3
+                } // dry acacia / scrub-forest edge
             } else {
-                1 // mesic broadleaf
+                // Mesic stand: pine, oak, gallery, giant — genome picks the silhouette.
+                match form {
+                    0 | 1 => 0,
+                    2 | 3 => 1,
+                    4 => 6,
+                    5 => 7,
+                    6 => 0,
+                    _ => 1,
+                }
             }
         }
         biome::id::SWAMP | biome::id::WETLAND | biome::id::RIPARIAN => {
-            if g % 5 == 0 {
+            if form % 5 == 0 {
                 4
+            } else if form % 3 == 0 {
+                1
             } else {
                 2
-            } // reed pockets in willow
+            }
         }
-        biome::id::MEADOW => {
-            if g % 4 == 0 {
-                5
-            } else {
-                1
-            } // orchard-like meadow trees rare
-        }
+        biome::id::MEADOW => match form % 5 {
+            0 => 5,
+            1 => 6,
+            2 => 0,
+            _ => 1,
+        },
         biome::id::SCRUB | biome::id::ALPINE | biome::id::BARE_ROCK | biome::id::DESERT
-        | biome::id::DUNE => 3,
+        | biome::id::DUNE => {
+            if form == 7 {
+                6
+            } else {
+                3
+            }
+        }
         biome::id::SHORE => 4,
         biome::id::FARM => 5,
         _ => {
             if arid > 0.55 {
                 3
+            } else if form == 5 {
+                7
+            } else if form % 4 == 0 {
+                6
             } else {
                 1
             }
@@ -519,13 +543,65 @@ impl RamaTerrain {
                 }
             }
         };
+        // Trees are landscape solids with their own material: excavating a
+        // trunk mines timber the same way digging rock mines strata.
+        let (theta, z, _) = self.ter().hab.to_cyl([p.x, p.y, p.z]);
+        // Whole stands first. Felling clears that plant's voxels, so the block
+        // sweep below can only ever bill for wood the felling did not already
+        // pay out — otherwise one bite at a trunk yielded the tree twice.
+        let (mut timber, trees) = self.mine_trees_at(theta, z, radius as f32 * 1.35);
+        let mut voxel_blocks = 0u32;
+        if let Some(bio) = self.bio.as_mut() {
+            let (wkg, lkg, n) = bio
+                .woodscape
+                .harvest_sphere([p.x, p.y, p.z], radius as f32 * 1.15);
+            voxel_blocks = n;
+            for (id, kg, grade) in [
+                (economy::bio_id::WOOD, wkg, 0.7f32),
+                (economy::bio_id::GREEN, lkg, 0.5f32),
+            ] {
+                if kg <= 0.05 {
+                    continue;
+                }
+                let ph = economy::bio_phys(id);
+                let vol = kg / ph.bulk_kg_m3.max(1.0);
+                timber.push(economy::YieldPart {
+                    material_id: id,
+                    volume_m3: vol,
+                    mass_kg: kg,
+                    loose_m3: vol * ph.bulking,
+                    grade,
+                });
+            }
+        }
+        // Chipping blocks off a standing trunk still reads as "you got timber".
+        let trees = trees + if trees == 0 && voxel_blocks > 0 { 1 } else { 0 };
+        // Timber first — dirt must not crowd wood out of a half-full pack.
         let mut accepted = 1.0f32;
+        let mut timber_accepted = 1.0f32;
         if auto_take {
-            accepted = self.pack.try_add(&y);
-            if accepted < 0.999 {
-                let spill_frac = (1.0 - accepted).max(0.0);
-                let (theta, z, _) = self.ter().hab.to_cyl([p.x, p.y, p.z]);
-                let hab_r = self.ter().hab.radius;
+            let hab_r = self.ter().hab.radius;
+            if timber.total_mass_kg > 1e-4 {
+                timber_accepted = self.pack.try_add(&timber);
+                if timber_accepted < 0.999 {
+                    let spill = (1.0 - timber_accepted).max(0.0);
+                    for part in &timber.parts {
+                        economy::deposit_heap(
+                            &mut self.heaps,
+                            hab_r,
+                            theta,
+                            z,
+                            part.material_id,
+                            part.mass_kg * spill,
+                            part.loose_m3 * spill,
+                            part.grade,
+                        );
+                    }
+                }
+            }
+            let dirt_acc = self.pack.try_add(&y);
+            if dirt_acc < 0.999 {
+                let spill = (1.0 - dirt_acc).max(0.0);
                 for part in &y.parts {
                     economy::deposit_heap(
                         &mut self.heaps,
@@ -533,32 +609,59 @@ impl RamaTerrain {
                         theta,
                         z,
                         part.material_id,
-                        part.mass_kg * spill_frac,
-                        part.loose_m3 * spill_frac,
+                        part.mass_kg * spill,
+                        part.loose_m3 * spill,
                         part.grade,
                     );
                 }
             }
+            // Combined acceptance for HUD (timber-weighted if we felled).
+            if trees > 0 {
+                accepted = timber_accepted;
+            } else {
+                accepted = dirt_acc;
+            }
         }
+        let mut combined = y.clone();
+        combined.append(&timber);
+        let timber_kg = timber
+            .parts
+            .iter()
+            .filter(|p| p.material_id == economy::bio_id::WOOD)
+            .map(|p| p.mass_kg)
+            .sum::<f32>();
+        let timber_kept = timber_kg * timber_accepted;
         let _ = d.insert("ok", true);
-        let _ = d.insert("mass_kg", y.total_mass_kg as f64);
-        let _ = d.insert("loose_m3", y.total_loose_m3 as f64);
-        let _ = d.insert("volume_m3", y.total_volume_m3 as f64);
+        let _ = d.insert("mass_kg", combined.total_mass_kg as f64);
+        let _ = d.insert("loose_m3", combined.total_loose_m3 as f64);
+        let _ = d.insert("volume_m3", combined.total_volume_m3 as f64);
         let _ = d.insert("accepted", accepted as f64);
-        let _ = d.insert("parts", Self::yield_to_array(&y));
-        if y.total_volume_m3 > 0.05 {
-            let (theta, z, _) = self.ter().hab.to_cyl([p.x, p.y, p.z]);
+        let _ = d.insert("trees", trees as i64);
+        let _ = d.insert("timber_kg", timber_kg as f64);
+        let _ = d.insert("timber_kept", timber_kept as f64);
+        let _ = d.insert("parts", Self::yield_to_array(&combined));
+        if combined.total_volume_m3 > 0.05 || trees > 0 {
             let hab_r = self.ter().hab.radius;
             if let Some(bio) = self.bio.as_mut() {
                 let day = bio.day;
+                let kind = if trees > 0 {
+                    chronicle::EventKind::Harvest
+                } else {
+                    chronicle::EventKind::Dig
+                };
+                let note = if trees > 0 { "you felled timber" } else { "you dug" };
                 bio.chronicle.record(
                     day,
                     theta,
                     z,
-                    chronicle::EventKind::Dig,
+                    kind,
                     chronicle::ACTOR_PLAYER,
-                    y.total_volume_m3,
-                    "you dug",
+                    if trees > 0 {
+                        timber.total_mass_kg
+                    } else {
+                        y.total_volume_m3
+                    },
+                    note,
                 );
                 Self::record_plot_helps(
                     bio,
@@ -566,12 +669,71 @@ impl RamaTerrain {
                     theta,
                     z,
                     hab_r,
-                    y.total_volume_m3,
-                    "you dug on their plot",
+                    if trees > 0 {
+                        timber.total_mass_kg * 0.4
+                    } else {
+                        y.total_volume_m3
+                    },
+                    if trees > 0 {
+                        "you felled on their plot"
+                    } else {
+                        "you dug on their plot"
+                    },
                 );
             }
         }
         d
+    }
+
+    /// Fell living plants whose trunks sit inside a surface-radius brush.
+    /// Returns (yield, count). Used by dig (mine trees) and deliberate harvest.
+    fn mine_trees_at(&mut self, theta: f32, z: f32, radius: f32) -> (economy::DigYield, u32) {
+        let mut out = economy::DigYield::default();
+        let mut n = 0u32;
+        let (hab_r, hab_len) = {
+            let t = self.ter();
+            (t.hab.radius, t.hab.length)
+        };
+        let Some(bio) = self.bio.as_mut() else {
+            return (out, 0);
+        };
+        let r = radius.max(0.8);
+        let mut hit: Vec<(f32, usize)> = Vec::new();
+        for (i, p) in bio.plants.plants.iter().enumerate() {
+            if !p.alive {
+                continue;
+            }
+            let dth = {
+                let x = (p.theta - theta).rem_euclid(std::f32::consts::TAU);
+                let x = x.min(std::f32::consts::TAU - x);
+                x * hab_r
+            };
+            let dz = p.z - z;
+            let dist = (dth * dth + dz * dz).sqrt();
+            let reach = r + plant::trunk_radius_m(p);
+            if dist <= reach {
+                hit.push((dist, i));
+            }
+        }
+        // Cap one dig bite — clear-felling a whole stand takes repeated swings.
+        hit.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+        const MAX_PER_BITE: usize = 2;
+        for &(_, i) in hit.iter().take(MAX_PER_BITE) {
+            let mut y = economy::harvest_plant(&bio.plants.plants[i]);
+            bio.plants.plants[i].alive = false;
+            // The stand's blocks go with it. Leaving them stamped left a whole
+            // canopy floating over the stump, and the wood in it would have
+            // been billed a second time by the next dig bite through the gap.
+            bio.woodscape.remove_plant(i as u32);
+            let npp = bio.trophic.npp_at(theta, z, hab_len);
+            let grade = (npp / 1800.0).clamp(0.15, 1.0);
+            for part in &mut y.parts {
+                part.grade = grade;
+            }
+            out.append(&y);
+            n += 1;
+        }
+        (out, n)
     }
 
     fn yield_to_array(y: &economy::DigYield) -> VariantArray {
@@ -635,7 +797,8 @@ impl RamaTerrain {
         match got {
             Some((mid, kg)) => {
                 let _ = d.insert("ok", true);
-                let _ = d.insert("material", material::name(mid));
+                let _ = d.insert("material", economy::bio_name(mid));
+                let _ = d.insert("material_id", mid as i64);
                 let _ = d.insert("kg", kg as f64);
             }
             None => {
@@ -667,7 +830,8 @@ impl RamaTerrain {
         match best {
             Some((h, d2)) => {
                 let _ = d.insert("ok", true);
-                let _ = d.insert("material", material::name(h.material_id));
+                let _ = d.insert("material", economy::bio_name(h.material_id));
+                let _ = d.insert("material_id", h.material_id as i64);
                 let _ = d.insert("kg", h.mass_kg as f64);
                 let _ = d.insert("distance", d2.sqrt() as f64);
             }
@@ -725,58 +889,23 @@ impl RamaTerrain {
     }
 
     /// Harvest the nearest living plant within `radius` m (item 813).
+    /// Same mine path as excavating a trunk — timber into the pack.
     #[func]
     fn harvest_near(&mut self, theta: f64, z: f64, radius: f64) -> Dictionary {
         let mut d = Dictionary::new();
-        let (hab_r, hab_len) = {
-            let Some(t) = self.t.as_ref() else {
-                let _ = d.insert("ok", false);
-                return d;
-            };
-            (t.hab.radius, t.hab.length)
-        };
-        let y = {
-            let Some(bio) = self.bio.as_mut() else {
-                let _ = d.insert("ok", false);
-                return d;
-            };
-            let th = theta as f32;
-            let zz = z as f32;
-            let r2 = (radius as f32).max(1.0).powi(2);
-            let mut best: Option<usize> = None;
-            let mut best_d = f32::MAX;
-            for (i, p) in bio.plants.plants.iter().enumerate() {
-                if !p.alive {
-                    continue;
-                }
-                let dth = {
-                    let x = (p.theta - th).rem_euclid(std::f32::consts::TAU);
-                    let x = x.min(std::f32::consts::TAU - x);
-                    x * hab_r
-                };
-                let dz = p.z - zz;
-                let dist2 = dth * dth + dz * dz;
-                if dist2 <= r2 && dist2 < best_d {
-                    best_d = dist2;
-                    best = Some(i);
-                }
-            }
-            let Some(i) = best else {
-                let _ = d.insert("ok", false);
-                return d;
-            };
-            let mut y = economy::harvest_plant(&bio.plants.plants[i]);
-            bio.plants.plants[i].alive = false;
-            // Tag harvest quality from local Miami NPP — lush bands cook better.
-            let npp = bio.trophic.npp_at(th, zz, hab_len);
-            let grade = (npp / 1800.0).clamp(0.15, 1.0);
-            for part in &mut y.parts {
-                part.grade = grade;
-            }
-            y
-        };
+        let (y, n) = self.mine_trees_at(theta as f32, z as f32, radius as f32);
+        if n == 0 {
+            let _ = d.insert("ok", false);
+            return d;
+        }
         let accepted = self.pack.try_add(&y);
         let grade = y.parts.first().map(|p| p.grade).unwrap_or(0.0);
+        let timber_kg = y
+            .parts
+            .iter()
+            .filter(|p| p.material_id == economy::bio_id::WOOD)
+            .map(|p| p.mass_kg)
+            .sum::<f32>();
         if y.total_mass_kg > 0.05 {
             let hab_r = self.ter().hab.radius;
             if let Some(bio) = self.bio.as_mut() {
@@ -788,7 +917,7 @@ impl RamaTerrain {
                     chronicle::EventKind::Harvest,
                     chronicle::ACTOR_PLAYER,
                     y.total_mass_kg,
-                    "you harvested",
+                    "you felled timber",
                 );
                 Self::record_plot_helps(
                     bio,
@@ -805,6 +934,8 @@ impl RamaTerrain {
         let _ = d.insert("mass_kg", y.total_mass_kg as f64);
         let _ = d.insert("accepted", accepted as f64);
         let _ = d.insert("grade", grade as f64);
+        let _ = d.insert("trees", n as i64);
+        let _ = d.insert("timber_kg", timber_kg as f64);
         let _ = d.insert("parts", Self::yield_to_array(&y));
         d
     }
@@ -1975,11 +2106,11 @@ impl RamaTerrain {
         let th = theta as f32;
         let zz = z as f32;
         let lim = limit.max(1) as usize;
-        let r_near = 55.0f32;
-        let r_mid = 140.0f32;
-        let r_far = 320.0f32;
+        let r_near = 90.0f32;
+        let r_mid = 220.0f32;
+        let r_far = 480.0f32;
         let mut counts = [0usize; 3];
-        let caps = [400usize, 500usize, 300usize];
+        let caps = [550usize, 700usize, 400usize];
         for p in &bio.plants.plants {
             if !p.alive {
                 continue;
@@ -2020,6 +2151,118 @@ impl RamaTerrain {
             }
         }
         PackedFloat32Array::from(out.as_slice())
+    }
+
+    /// Connected wood/leaf blocks near the camera. Streams stands in and out:
+    /// sprouts what came into range, unloads what fell well behind, then dumps
+    /// the near set as flat [x, y, z, kind, up01, ...] — kind 1 wood, 2 leaf,
+    /// up01 the cell's height up its own crown (the renderer shades by it).
+    #[func]
+    fn woodscape_lod(
+        &mut self,
+        x: f64,
+        y: f64,
+        z: f64,
+        radius: f64,
+        limit: i64,
+    ) -> PackedFloat32Array {
+        let center = [x as f32, y as f32, z as f32];
+        let rad = (radius as f32).max(8.0);
+        let lim = limit.max(1) as usize;
+        // Snapshot which stands to stamp under an immutable borrow — the biome
+        // lookup needs the whole biosphere, the stamping needs it mutable.
+        // Bounded per call so arriving at a dense grove costs several frames of
+        // stamping rather than one visible hitch.
+        let to_sprout: Vec<(usize, plant::Plant, u8)> = {
+            let (Some(bio), Some(ter)) = (self.bio.as_ref(), self.t.as_ref()) else {
+                return PackedFloat32Array::from([].as_slice());
+            };
+            if bio.woodscape.is_full() {
+                Vec::new()
+            } else {
+                let r2 = rad * rad;
+                let hab_r = ter.hab.radius;
+                let (cth, cz, _) = ter.hab.to_cyl(center);
+                bio.plants
+                    .plants
+                    .iter()
+                    .enumerate()
+                    .filter(|(i, p)| p.alive && !bio.woodscape.is_sprouted(*i as u32))
+                    .filter(|(_, p)| {
+                        let dth = {
+                            let x = (p.theta - cth).rem_euclid(std::f32::consts::TAU);
+                            let x = x.min(std::f32::consts::TAU - x);
+                            x * hab_r
+                        };
+                        let dz = p.z - cz;
+                        dth * dth + dz * dz <= r2
+                    })
+                    .take(48)
+                    .map(|(i, p)| {
+                        let bid = bio.biome_at(ter, p.theta, p.z);
+                        let kind = forest_kind(bid, &bio.weather, ter, p.theta, p.z, p.genome_id);
+                        (i, p.clone(), kind)
+                    })
+                    .collect()
+            }
+        };
+        let (Some(bio), Some(ter)) = (self.bio.as_mut(), self.t.as_ref()) else {
+            return PackedFloat32Array::from([].as_slice());
+        };
+        // Unload first: the grid is capped, and a full grid refuses the stand
+        // you are walking toward while still holding one a kilometre behind.
+        bio.woodscape.prune_far(center, rad * 2.2);
+        for (i, p, kind) in to_sprout {
+            if bio.woodscape.is_full() {
+                break;
+            }
+            bio.woodscape.sprout_plant(i, &p, ter, kind);
+        }
+        PackedFloat32Array::from(bio.woodscape.lod_near(center, rad, lim).as_slice())
+    }
+
+    /// Place one wood (or leaf) block from the pack — attaches to neighbours.
+    #[func]
+    fn place_veg_block(&mut self, p: Vector3, as_leaf: bool) -> Dictionary {
+        let mut d = Dictionary::new();
+        let need = if as_leaf {
+            economy::bio_id::GREEN
+        } else {
+            economy::bio_id::WOOD
+        };
+        let cost = if as_leaf { 0.4 } else { 2.5 };
+        // Check before taking. Taking and refunding on failure put the material
+        // back at grade 0, so a rejected placement quietly downgraded the whole
+        // timber stack to firewood.
+        if self.pack.mass_of(need) < cost {
+            let _ = d.insert("ok", false);
+            let _ = d.insert("error", "need_material");
+            return d;
+        }
+        let got = self.pack.take_mass(need, cost);
+        let Some(bio) = self.bio.as_mut() else {
+            let _ = d.insert("ok", false);
+            return d;
+        };
+        let k = woodscape::quantize([p.x, p.y, p.z]);
+        let kind = if as_leaf {
+            woodscape::kind::LEAF
+        } else {
+            woodscape::kind::WOOD
+        };
+        bio.woodscape.set(k, kind, u32::MAX);
+        let _ = d.insert("ok", true);
+        let _ = d.insert("kind", if as_leaf { "leaf" } else { "timber" });
+        let _ = d.insert("kg", got as f64);
+        d
+    }
+
+    #[func]
+    fn woodscape_count(&self) -> i64 {
+        self.bio
+            .as_ref()
+            .map(|b| b.woodscape.len() as i64)
+            .unwrap_or(0)
     }
 
     #[func]

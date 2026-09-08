@@ -15,15 +15,17 @@ uniform vec3 haze_color : source_color = vec3(0.170, 0.225, 0.290);
 uniform float fade_start = 22.0;
 uniform float fade_end = 36.0;
 uniform float sway = 0.34;
+uniform float model_height = 1.0;
 
 varying vec3 w_pos;
 varying vec3 w_nrm;
 varying vec4 v_col;
 varying float v_h;
 varying float v_haze_f;
+varying float v_contact;
 
 void vertex() {
-	v_h = clamp(VERTEX.y, 0.0, 1.0);
+	v_h = clamp(VERTEX.y / max(model_height, 0.01), 0.0, 1.0);
 	vec3 local = VERTEX;
 	vec3 wp = (MODEL_MATRIX * vec4(0.0, 0.0, 0.0, 1.0)).xyz;
 	float ph = wp.x * 0.11 + wp.z * 0.09 + TIME * 1.35;
@@ -48,23 +50,25 @@ void fragment() {
 	vec3 N = normalize(w_nrm);
 	NORMAL = normalize((VIEW_MATRIX * vec4(N, 0.0)).xyz);
 
-	vec3 albedo = srgb_to_linear(v_col.rgb);
-	albedo *= 0.38 + 0.62 * v_h;
-	albedo += vec3(0.04, 0.06, 0.01) * v_h * rama_day;
-
-	float greenness = clamp(albedo.g - max(albedo.r, albedo.b), 0.0, 1.0);
-	albedo = mix(albedo, vec3(dot(albedo, vec3(0.35, 0.50, 0.15))), greenness * 0.35);
-	albedo.r += greenness * 0.03;
+	vec3 pigment = v_col.rgb;
+	float green_mask = smoothstep(0.02, 0.16, pigment.g - max(pigment.r, pigment.b));
+	float pigment_value = dot(pigment, vec3(0.28, 0.58, 0.14));
+	pigment = mix(pigment, pigment_value * vec3(0.94, 1.045, 0.73), green_mask * 0.66);
+	// Root to tip: cool grounded olive, then a restrained straw-green highlight.
+	pigment *= mix(vec3(0.77, 0.85, 0.80), vec3(1.06, 1.04, 0.92), v_h);
+	vec3 albedo = srgb_to_linear(pigment);
+	float contact = mix(0.48, 1.0, smoothstep(0.02, 0.62, v_h));
 
 	vec3 bounce = rama_bounce(bounce_tint);
 	vec3 to_axis = rama_to_axis(w_pos);
-	float sss = pow(max(dot(N, -to_axis), 0.0), 1.6) * 0.22 * rama_day;
-	vec3 fill = albedo * (bounce * 0.58 + rama_sky_fill(rama_day))
-			  + vec3(0.18, 0.32, 0.08) * sss * rama_energy(2.15, rama_day);
+	float sss = pow(max(dot(N, -to_axis), 0.0), 1.6) * 0.12 * rama_day * v_h;
+	vec3 fill = albedo * (bounce * 0.48 + rama_sky_fill(rama_day)) * contact
+			  + srgb_to_linear(vec3(0.47, 0.51, 0.20)) * sss * rama_energy(1.90, rama_day);
 
 	// feature: grass blade haze beyond fade band (~20–280 m)
 	float f = clamp((d - 20.0) / 260.0, 0.0, 1.0) * 0.55;
 	v_haze_f = f;
+	v_contact = contact;
 
 	ALBEDO = mix(albedo, vec3(0.0), f);
 	EMISSION = mix(fill, rama_air(haze_color, rama_day), f);
@@ -72,7 +76,7 @@ void fragment() {
 
 void light() {
 	vec3 sun = rama_sun(night_tint, sun_tint, rama_day);
-	float energy = rama_energy(2.15, rama_day);
-	float ndl = 0.42 + 0.58 * max(dot(NORMAL, LIGHT), 0.0);
-	DIFFUSE_LIGHT += sun * ndl * energy * 0.62 * ATTENUATION * (1.0 - v_haze_f);
+	float energy = rama_energy(1.90, rama_day);
+	float ndl = 0.27 + 0.73 * max(dot(NORMAL, LIGHT), 0.0);
+	DIFFUSE_LIGHT += sun * ndl * energy * 0.72 * v_contact * ATTENUATION * (1.0 - v_haze_f);
 }

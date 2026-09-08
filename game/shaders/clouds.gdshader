@@ -1,75 +1,83 @@
 shader_type spatial;
 render_mode cull_disabled, unshaded, depth_draw_never, blend_mix;
 
-// Clouds in a drum form AXIAL STRIPES, not Earth-like patches.
-// Rossby number ~0.025: air cannot cross the drum; flow organises into
-// bands along the axis. LANDSCAPE_200.md items 88–92.
+#include "rama_light.gdshaderinc"
 
+// Condensation follows the drum's axial weather circulation, but individual
+// banks have finite extent in both directions. The periodic angular domain
+// closes the cylinder without a seam or the old full-length white curtains.
 global uniform float rama_day;
-uniform vec3 tint : source_color = vec3(0.78, 0.84, 0.90);
+global uniform float rama_haze;
+uniform vec3 tint : source_color = vec3(0.77, 0.82, 0.83);
 uniform float cover = 0.55;
 
 varying vec3 w_pos;
-varying vec3 w_norm;
 
-float h21(vec2 p) { return fract(sin(dot(p, vec2(41.3, 289.1))) * 43758.5453); }
-float vnoise(vec2 p) {
-    vec2 i = floor(p); vec2 f = fract(p); f = f * f * (3.0 - 2.0 * f);
-    return mix(mix(h21(i), h21(i + vec2(1,0)), f.x),
-               mix(h21(i + vec2(0,1)), h21(i + vec2(1,1)), f.x), f.y);
+float cloud_hash(vec2 p) {
+    vec3 p3 = fract(vec3(p.xyx) * 0.1031);
+    p3 += dot(p3, p3.yzx + 33.33);
+    return fract((p3.x + p3.y) * p3.z);
+}
+
+float cloud_noise(vec2 p, float period) {
+    vec2 i = floor(p);
+    vec2 f = fract(p);
+    f = f * f * f * (f * (f * 6.0 - 15.0) + 10.0);
+    vec2 a = vec2(mod(i.x, period), i.y);
+    vec2 b = vec2(mod(i.x + 1.0, period), i.y);
+    return mix(mix(cloud_hash(a), cloud_hash(b), f.x),
+               mix(cloud_hash(a + vec2(0.0, 1.0)),
+                   cloud_hash(b + vec2(0.0, 1.0)), f.x), f.y);
 }
 
 void vertex() {
     w_pos = (MODEL_MATRIX * vec4(VERTEX, 1.0)).xyz;
-    w_norm = normalize((MODEL_MATRIX * vec4(NORMAL, 0.0)).xyz);
 }
 
 void fragment() {
-    float th = atan(w_pos.y, w_pos.x);
-    // Bands run ALONG the axis — Rossby ~0.025, air cannot cross the drum. But
-    // a band that is literally constant in z projects, when you look up the
-    // drum, into a fan of radial rays: venetian blinds over the whole sky. So
-    // let the band meander in z and break into decks. Same physics, weather
-    // instead of blinds. feature: meander ~600 m of axis, decks ~1100 m
-    float zk = w_pos.z * 0.0016;
-    float band = th * 11.5 + TIME * 0.012
-               + sin(zk * 2.1) * 1.10 + sin(zk * 0.73 + 2.4) * 0.62;
-    float stripe = vnoise(vec2(band, zk * 1.7)) * 0.70
-                 + vnoise(vec2(band * 2.2 + 3.1, zk * 3.1 + 0.4)) * 0.30;
-    // 3rd octave for wispy edge texture — what makes clouds not look like
-    // a cylinder with alpha.
-    float wisp = vnoise(vec2(band * 4.4 + 7.2, w_pos.z * 0.003 + TIME * 0.008)) * 0.15;
-    float axial = vnoise(vec2(th * 1.2, w_pos.z * 0.0018 + TIME * 0.004)) * 0.18;
-    float n = stripe + axial + wisp;
-    // Axial bands are physically right (Coriolis), but looked at DOWN the axis
-    // a banded cylinder projects into radial wedges that read as blinds.
-    n = mix(n, 0.5, 0.30);
-    n += (vnoise(vec2(band * 9.0 + 71.0, w_pos.z * 0.0065)) - 0.5) * 0.16;
-    // Decks end. Without this the band is an unbroken ribbon the full 6 km.
-    float deck = vnoise(vec2(zk * 0.55 + TIME * 0.003, th * 0.55));
-    n *= 0.62 + 0.78 * smoothstep(0.28, 0.74, deck);
-    float a = smoothstep(cover, cover + 0.34, n);
-    float d = length(w_pos - CAMERA_POSITION_WORLD);
-    // feature: cloud bands fade in by 400 m, out by 3200 m
-    a *= clamp(d / 400.0, 0.0, 1.0);
-    a *= clamp(1.0 - d / 3200.0, 0.0, 1.0);
+    float radius = max(length(w_pos.xy), 1.0);
+    float dist = length(w_pos - CAMERA_POSITION_WORLD);
+    vec3 toward_view = normalize(CAMERA_POSITION_WORLD - w_pos);
+    vec3 up = rama_to_axis(w_pos);
+    float facing = abs(dot(toward_view, up));
+    // feature: banks ~235 m around / 300 m along a 600 m condensation shell;
+    // continental breaks ~900 m, soft billows ~60 m. All scale with the shell.
+    vec2 p = vec2(atan(w_pos.y, w_pos.x) * (16.0 / 6.28318530718),
+                  w_pos.z / (radius * 0.50));
+    p += vec2(TIME * 0.0015, TIME * 0.0030);
+    float weather = cloud_noise(p * 0.25 + vec2(0.0, 7.4), 4.0);
+    vec2 warp = vec2(sin(p.y * 0.82 + weather * 3.0) * 0.23,
+                     sin(p.x * 0.3926990817) * 0.17);
+    vec2 q = p + warp;
+    float broad = cloud_noise(q, 16.0);
+    float billow = cloud_noise(q * 2.0 + vec2(0.0, 17.0), 32.0);
+    // feature: 60 m edge detail retires over 1500–2800 m; no fine screen noise.
+    float detail = 1.0 - smoothstep(1500.0, 2800.0, dist);
+    float fine = mix(0.5, cloud_noise(q * 4.0 + vec2(0.0, 31.0), 64.0), detail);
+    float field = broad * 0.62 + billow * 0.27 + fine * 0.11;
+    // `cover` is cloud amount from weather, so increasing it thickens the deck.
+    float threshold = mix(0.64, 0.43, clamp(cover, 0.0, 1.0));
+    float bank = smoothstep(threshold, threshold + 0.19, field);
+    bank *= smoothstep(0.26, 0.61, weather);
+    float veil = smoothstep(threshold - 0.045, threshold + 0.06, field)
+               * (1.0 - bank) * 0.07;
+    float density = bank * 0.47 + veil;
+    // feature: extinction 140–3400 m; shell grazes dissolve before becoming ribbons.
+    density *= smoothstep(140.0, 360.0, dist)
+             * (1.0 - smoothstep(1900.0, 3400.0, dist));
+    density *= smoothstep(0.07, 0.38, facing);
+    if (density < 0.006) { discard; }
 
-    // Self-shadowing: top-lit faces are brighter, bottom faces darker.
-    // Clouds that are the same brightness top and bottom look like decals.
-    vec3 to_axis = normalize(vec3(-w_pos.x, -w_pos.y, 0.0));
-    float self_shadow = 0.72 + 0.28 * max(dot(w_norm, to_axis), 0.0);
-
-    // Dawn/dusk colour: clouds pick up the axis strip's warm colour.
-    // During the day they're cool grey; at golden hour they're salmon/amber.
-    vec3 warm_tint = mix(vec3(1.0, 0.65, 0.42), vec3(1.0, 0.92, 0.85), rama_day);
-    vec3 cloud_col = mix(tint * warm_tint, tint, rama_day * 0.75 + 0.25);
-
-    // Dim with the day schedule — bright white decks were bleaching the sky.
-    ALBEDO = cloud_col * (0.45 + 0.40 * rama_day) * self_shadow;
-    // Fade when viewed edge-on — exactly the angle that makes the wedges.
-    vec3 vdir = normalize(w_pos - CAMERA_POSITION_WORLD);
-    vec3 radial = normalize(vec3(w_pos.x, w_pos.y, 0.0));
-    float graze = abs(dot(vdir, radial));
-    ALPHA = a * 0.36 * (0.22 + 0.78 * graze);
+    // Rounded dense interiors retain a cool underside; thin edges catch the
+    // warm axis. Optical scattering is approximated on one shell (no raymarch).
+    float core = smoothstep(threshold + 0.07, threshold + 0.26, field);
+    vec3 sun = rama_sun(vec3(0.47, 0.53, 0.65), vec3(1.0, 0.94, 0.82), rama_day);
+    vec3 cloud = srgb_to_linear(tint) * mix(vec3(1.03, 1.03, 1.0),
+                         vec3(0.65, 0.74, 0.79), core * 0.65);
+    cloud *= sun * rama_energy(0.82, rama_day) + rama_sky_fill(rama_day) * 1.6;
+    cloud += srgb_to_linear(vec3(0.92, 0.82, 0.64)) * (1.0 - core)
+           * bank * 0.055 * rama_day;
+    float air_mix = rama_haze_factor(dist, 650.0, 3400.0, 0.42, rama_haze); // feature: cloud air 650–3400 m
+    ALBEDO = mix(cloud, rama_air(vec3(0.17, 0.225, 0.29), rama_day), air_mix);
+    ALPHA = density;
 }
-

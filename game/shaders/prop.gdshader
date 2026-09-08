@@ -32,10 +32,15 @@ void fragment() {
 	vec3 N = normalize(w_nrm);
 	NORMAL = normalize((VIEW_MATRIX * vec4(N, 0.0)).xyz);
 
-	vec3 body = srgb_to_linear(v_col.rgb * albedo_scale);
+	vec3 pigment = v_col.rgb * albedo_scale;
+	float value = dot(pigment, vec3(0.28, 0.58, 0.14));
+	vec3 body = srgb_to_linear(mix(pigment, vec3(value), 0.08));
 	vec3 bounce = rama_bounce(bounce_tint);
-	float amb = 0.34 + 0.48 * (1.0 - max(dot(N, rama_to_axis(w_pos)), 0.0));
-	vec3 fill = body * (bounce * amb * 0.60 + rama_sky_fill(rama_day) * 0.9);
+	float facing = max(dot(N, rama_to_axis(w_pos)), 0.0);
+	float amb = 0.32 + 0.34 * (1.0 - facing);
+	// Cool bounced light separates shaded planes from the warm sunlit faces.
+	vec3 fill_tint = mix(bounce, vec3(0.32, 0.40, 0.49), 0.32);
+	vec3 fill = body * (fill_tint * amb * 0.56 + rama_sky_fill(rama_day) * 0.86);
 	// Dusk settlement lights — boosted by world.gd via emission_boost / colour.
 	fill += body * emission_boost * (1.0 - rama_day);
 
@@ -50,6 +55,6 @@ void fragment() {
 void light() {
 	vec3 sun = rama_sun(night_tint, sun_tint, rama_day);
 	float energy = rama_energy(1.32, rama_day);
-	float ndl = pow(max(dot(NORMAL, LIGHT), 0.0), 0.72);
+	float ndl = pow(max(dot(NORMAL, LIGHT), 0.0), 0.86);
 	DIFFUSE_LIGHT += sun * ndl * energy * ATTENUATION * (1.0 - v_haze_f);
 }

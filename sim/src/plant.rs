@@ -29,14 +29,14 @@ pub struct Plant {
 impl Default for Plant {
     fn default() -> Self {
         Self {
-            carbon: 0.05,
-            root: 0.08,
-            leaf: 0.10,
-            stem: 0.06,
-            repro: 0.0,
+            carbon: 0.35,
+            root: 0.35,
+            leaf: 0.55,
+            stem: 0.50,
+            repro: 0.04,
             water_status: 1.0,
             n_status: 1.0,
-            age: 0.0,
+            age: 80.0,
             stress: 0.0,
             genome_id: 0,
             theta: 0.0,
@@ -44,6 +44,17 @@ impl Default for Plant {
             alive: true,
         }
     }
+}
+
+/// Approximate crown height in metres — shared by render scale and dig hit tests.
+#[allow(dead_code)]
+pub fn crown_height_m(p: &Plant) -> f32 {
+    (6.0 + p.stem * 38.0 + p.leaf * 10.0).clamp(5.0, 42.0)
+}
+
+/// Trunk half-width in metres — dig brush must overlap this to mine timber.
+pub fn trunk_radius_m(p: &Plant) -> f32 {
+    (0.55 + p.stem * 2.2).clamp(0.65, 3.2)
 }
 
 pub struct PlantSim {
@@ -110,17 +121,25 @@ impl PlantSim {
             p.genome_id = (rng >> 16) & 0xFF;
             p.n_status = s.n.clamp(0.1, 1.0);
             p.water_status = s.moisture.clamp(0.1, 1.0);
-            // Slight size jitter from flux (riparian edge grows faster).
-            let mut scale = 0.85 + 0.40 * f.clamp(0.0, 1.0);
+            // Size classes: many poles, some canopy, rare giants (power-law-ish).
+            rng = rng.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            let u = ((rng >> 16) & 0xFF) as f32 / 255.0;
+            let size_roll = u.powf(0.62); // skew toward mid-size, keep giants rare
+            let mut scale = 0.45 + 0.70 * f.clamp(0.0, 1.0) + 1.35 * size_roll;
+            // Moist well-drained ground grows taller — forest cores.
+            if s.moisture > 0.35 && f > 0.12 {
+                scale *= 1.25;
+            }
             if farm_w > 0.4 {
-                scale *= 0.82; // orchard scale, not wild canopy
+                scale *= 0.55; // orchard scale, not wild canopy
             }
             if city_w > 0.4 {
-                scale *= 0.70;
+                scale *= 0.42;
             }
             p.root *= scale;
             p.leaf *= scale;
             p.stem *= scale;
+            p.age = 20.0 + size_roll * 180.0;
             self.plants.push(p);
             placed += 1;
             if self.plants.len() >= MAX_PLANTS {

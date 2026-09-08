@@ -34,6 +34,13 @@ var view := 0            # 0 colonist · 1 drum · 2 map
 var drum_spin := 0.0
 var cam_dist_target := 4.6
 var last_aim := {}
+## Biological material ids from the sim's `economy::bio_id`, and the mass one
+## placed block spends. Kept in step with `place_veg_block`, which charges the
+## same amounts — if these drift the fill button silently falls back to dirt.
+const MAT_GREEN := 100
+const MAT_WOOD := 101
+const WOOD_BLOCK_KG := 2.5
+const LEAF_BLOCK_KG := 0.4
 var can_dig := true
 var ghost: Node3D
 var level_brush := false
@@ -282,14 +289,51 @@ func _edit(remove: bool) -> void:
 		world.terrain.notify_dig(p, brush)
 		world.schedule_pool_refresh()
 		world.schedule_stockpile_refresh()
+		var trees: int = int(y.get("trees", 0))
+		if trees > 0:
+			world.force_plant_refresh()
+			world.refresh_stockpiles()
+			world.refresh_woodscape(true)
+			var timber: float = float(y.get("timber_kg", 0.0))
+			var kept: float = float(y.get("timber_kept", timber))
+			if kept > 0.05 and kept + 0.05 >= timber:
+				world.note("felled · +%.0f kg timber in pack" % kept)
+			elif kept > 0.05:
+				world.note("felled · +%.0f kg pack · rest piled · L to take" % kept)
+			elif timber > 0.05:
+				world.note("pack full · timber piled · L to take")
+			else:
+				world.note("felled tree")
+		elif float(y.get("accepted", 1.0)) < 0.95:
+			world.refresh_stockpiles()
+			world.note("pack full · spoil piled · L to take")
+		last_aim["yield_kg"] = float(y.get("mass_kg", 0.0))
+		last_aim["yield_accepted"] = float(y.get("accepted", 1.0))
+		last_aim["trees"] = trees
 		var wdep: float = world.terrain.water_depth_at(atan2(p.y, p.x), p.z)
 		if wdep > 0.05 or world.terrain.water_flux(atan2(p.y, p.x), p.z) > 0.15:
 			world.spawn_dig_splash(p, brush * 0.35 + wdep * 0.5)
-		# Brief yield flash in the aim readout.
-		last_aim["yield_kg"] = float(y.get("mass_kg", 0.0))
-		last_aim["yield_accepted"] = float(y.get("accepted", 1.0))
 	else:
-		world.terrain.fill(p, brush * 0.8, world.DIG_SNAP, level_brush)
+		# Prefer placing timber/leaf from pack — blocks combine with neighbours.
+		var placed := false
+		var inv: Dictionary = world.terrain.inventory()
+		var have_wood := 0.0
+		var have_leaf := 0.0
+		for s in inv.get("stacks", []):
+			var mid: int = int(s.get("material_id", -1))
+			if mid == MAT_WOOD:
+				have_wood = float(s.get("mass_kg", 0.0))
+			elif mid == MAT_GREEN:
+				have_leaf = float(s.get("mass_kg", 0.0))
+		if have_wood >= WOOD_BLOCK_KG or have_leaf >= LEAF_BLOCK_KG:
+			var as_leaf: bool = have_wood < WOOD_BLOCK_KG and have_leaf >= LEAF_BLOCK_KG
+			var pv: Dictionary = world.terrain.place_veg_block(p, as_leaf)
+			if pv.get("ok", false):
+				placed = true
+				world.refresh_woodscape(true)
+				world.note("placed %s · combines with neighbours" % str(pv.get("kind", "block")))
+		if not placed:
+			world.terrain.fill(p, brush * 0.8, world.DIG_SNAP, level_brush)
 	world.rebuild_around(p, brush * (2.0 if level_brush else 1.0) + 2.0)
 	if world.audio:
 		var hard := 1.0
@@ -626,11 +670,20 @@ func _actions(dt: float) -> void:
 	if Input.is_action_just_pressed(A.act("throw")):
 		_throw()
 	if Input.is_action_just_pressed(A.act("harvest")):
-		var hy: Dictionary = world.terrain.harvest_near(theta, z, 4.5)
+		var hy: Dictionary = world.terrain.harvest_near(theta, z, 5.5)
 		if hy.get("ok", false):
 			world.refresh_stockpiles()
+			world.force_plant_refresh()
+			var timber: float = float(hy.get("timber_kg", 0.0))
+			var kg: float = float(hy.get("mass_kg", 0.0))
+			if timber > 0.05:
+				world.note("felled · +%.0f kg timber" % timber)
+			else:
+				world.note("harvested · +%.1f kg" % kg)
 			if world.audio:
-				world.audio.place()
+				world.audio.dig(1.2, 0.6)
+		else:
+			world.note("no tree in reach")
 	if Input.is_action_pressed(A.act("bottle")):
 		_bottle_water()
 	if Input.is_action_just_pressed(A.act("take")):
@@ -773,6 +826,9 @@ func _refresh_aim() -> void:
 		var pr: Dictionary = world.terrain.probe(hit["point"])
 		can_dig = bool(pr.get("diggable", true))
 		last_aim["kind"] = pr.get("kind", "")
+	# Heap under your feet, read here rather than from the reticle's _draw:
+	# the reticle redraws every frame, and this walks the whole heap list.
+	last_aim["heap"] = world.terrain.heap_in_reach(theta, z, 3.5)
 	if highlight:
 		var show_brush: bool = hit.get("hit", false) and view == 0 \
 			and not RamaControls.photo_mode

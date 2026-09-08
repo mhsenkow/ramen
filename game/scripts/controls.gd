@@ -24,7 +24,7 @@ const ACTIONS := [
 	{"id": "map_out",   "label": "Plan zoom out",  "key": KEY_MINUS,  "btn": JOY_BUTTON_DPAD_LEFT},
 	{"id": "view",      "label": "Switch view",    "key": KEY_TAB,    "btn": JOY_BUTTON_RIGHT_STICK},
 	{"id": "throw",     "label": "Throw object",   "key": KEY_T,      "btn": JOY_BUTTON_DPAD_DOWN},
-	{"id": "harvest",   "label": "Harvest plant",  "key": KEY_H,      "btn": JOY_BUTTON_MISC1},
+	{"id": "harvest",   "label": "Fell tree",      "key": KEY_H,      "btn": JOY_BUTTON_MISC1},
 	{"id": "drop",      "label": "Drop pack",      "key": KEY_X,      "btn": JOY_BUTTON_BACK},
 	{"id": "take",      "label": "Take from heap",  "key": KEY_L,      "btn": JOY_BUTTON_GUIDE},
 	{"id": "craft",     "label": "Craft recipe",   "key": KEY_K,      "btn": JOY_BUTTON_PADDLE1},

@@ -114,6 +114,13 @@ pub struct DigYield {
 }
 
 impl DigYield {
+    /// Fold another yield into this one (mine trees into a dig bite).
+    pub fn append(&mut self, other: &DigYield) {
+        for part in &other.parts {
+            self.push(*part);
+        }
+    }
+
     pub(crate) fn push(&mut self, part: YieldPart) {
         if part.volume_m3 <= 1e-8 && part.mass_kg <= 1e-6 {
             return;
@@ -446,11 +453,12 @@ pub fn bio_phys(id: u8) -> Phys {
 pub fn harvest_plant(p: &Plant) -> DigYield {
     let mut y = DigYield::default();
     // Pools are dimensionless carbon; scale so a mature stand yields kilograms.
+    // Timber is the mineable bulk — leaf/fibre ride along as bycatch.
     const KG: f32 = 12.0;
     let parts = [
         (bio_id::FIBRE, p.root * KG * 0.85),
-        (bio_id::GREEN, p.leaf * KG),
-        (bio_id::WOOD, p.stem * KG),
+        (bio_id::GREEN, p.leaf * KG * 1.4),
+        (bio_id::WOOD, p.stem * KG * 5.5),
         (bio_id::SEED, p.repro * KG * 1.2),
     ];
     for (id, mass) in parts {
@@ -493,9 +501,9 @@ impl Default for Inventory {
     fn default() -> Self {
         Self {
             stacks: Vec::new(),
-            // Workshop pack: room for a kiln batch without instant spill.
-            max_mass_kg: 60.0,
-            max_volume_m3: 0.055,
+            // Room for a couple felled trunks plus a dig bite — timber is bulky.
+            max_mass_kg: 90.0,
+            max_volume_m3: 0.18,
         }
     }
 }
@@ -1639,10 +1647,14 @@ mod tests {
             total_volume_m3: 0.05,
         };
         let frac = inv.try_add(&y);
+        // The bound is the configured cap, not a hardcoded fraction: the pack
+        // grew to hold felled trunks, and a literal here just goes stale.
+        let expect = (inv.max_mass_kg / 150.0).min(inv.max_volume_m3 / 0.065);
         assert!(
-            frac < 0.45,
-            "should reject most of a 150 kg bite, frac={frac}"
+            (frac - expect).abs() < 0.02,
+            "mass cap should bind at {expect:.3}, got frac={frac}"
         );
+        assert!(frac < 1.0, "a 150 kg bite must not fit whole");
         assert!(inv.mass_kg() <= inv.max_mass_kg + 1e-3);
     }
 

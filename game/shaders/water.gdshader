@@ -51,7 +51,7 @@ void fragment() {
     float edge = smoothstep(0.08, 0.28, cover) * (1.0 - smoothstep(0.45, 0.95, cover));
 
     // Near seas need body chroma; far keeps the old soft backdrop look.
-    float near_body = 1.0 - smoothstep(40.0, 180.0, dist);
+    float near_body = 1.0 - smoothstep(40.0, 180.0, dist); // metre-ok: camera band
     float rfade = clamp(1.0 - dist / 1400.0, 0.0, 1.0); // metre-ok: backdrop scale
     float rip = sin(w_pos.z * 0.10 + TIME * 0.22)
               + sin(w_pos.x * 0.08 - TIME * 0.16);

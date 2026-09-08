@@ -330,10 +330,10 @@ static func build(parent: Node3D, b: Dictionary, cast_shadow := true) -> Diction
 		# Trapezius: fills the gap from neck to shoulder. Absent on a twink,
 		# and on a jock it is most of why he has no neck.
 		if float(b["muscle"]) > 0.35 or float(b["neck"]) > 0.5:
-			var tr: float = maxf(float(b["muscle"]) - 0.2, 0.0) * 0.55 + float(b["neck"]) * 0.25
-			_part(chest, Vector3(rib_w * 0.46, m["chest_h"] * 0.30 * tr, m["chest_d"] * 0.62),
+			var trap: float = maxf(float(b["muscle"]) - 0.2, 0.0) * 0.55 + float(b["neck"]) * 0.25
+			_part(chest, Vector3(rib_w * 0.46, m["chest_h"] * 0.30 * trap, m["chest_d"] * 0.62),
 					top.lightened(0.03),
-					Vector3(side * rib_w * 0.26, m["chest_h"] * (0.92 + 0.06 * tr), 0), mat)
+					Vector3(side * rib_w * 0.26, m["chest_h"] * (0.92 + 0.06 * trap), 0), mat)
 	if float(b["fur"]) > 0.35:
 		_part(chest, Vector3(m["waist_w"] * 0.52, m["chest_h"] * 0.44, 0.010),
 				hair_col.lerp(skin, 0.30),
@@ -433,7 +433,8 @@ static func build(parent: Node3D, b: Dictionary, cast_shadow := true) -> Diction
 		_part(foot, Vector3(m["foot_w"], m["foot_h"], m["foot_l"]),
 				shoe, Vector3(0, -m["foot_h"] * 0.5, m["foot_l"] * 0.18), mat)
 
-	var shadow: int = GeometryInstance3D.SHADOW_CASTING_SETTING_ON if cast_shadow \
+	var shadow: GeometryInstance3D.ShadowCastingSetting = \
+			GeometryInstance3D.SHADOW_CASTING_SETTING_ON if cast_shadow \
 			else GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 	for n in parent.find_children("*", "MeshInstance3D", true, false):
 		(n as MeshInstance3D).cast_shadow = shadow

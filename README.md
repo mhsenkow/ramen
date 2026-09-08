@@ -14,8 +14,10 @@ Desktop builds ship for **macOS**, **Windows**, **Linux**, **Steam Deck**, and *
 ```
 
 **WASD** move · **mouse** look · **Space** jump · **Shift** run
-**LEFT CLICK / F** excavate (hold) · **RIGHT CLICK / G** install module
-**C** brush shape (sphere / levelling) · **R** add material · **Z** undo
+**LEFT CLICK / F** excavate (hold) — digs rock *and* mines wood/leaf blocks for timber
+**RIGHT CLICK / R** fill — places timber/leaf from your pack if you carry any (blocks combine);
+otherwise adds dirt · **H** fell nearest plant · **L** take spoil/timber heap
+**C** brush shape (sphere / levelling) · **Z** undo
 **Q/E** or two-finger side-scroll: brush size · **scroll**: camera zoom
 **1-4** module · **B** drop a waypoint · **+/-** plan-view zoom
 **T** throw (Coriolis) · **P** tilt-shift · **TAB** switch view

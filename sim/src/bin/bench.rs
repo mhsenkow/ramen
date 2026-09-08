@@ -47,6 +47,8 @@ mod terrain;
 mod trophic;
 #[path = "../weather.rs"]
 mod weather;
+#[path = "../woodscape.rs"]
+mod woodscape;
 
 use std::time::Instant;
 
