@@ -365,10 +365,7 @@ mod tests {
             max_m >= 200.0,
             "Kepler Drum should support large ungulates, got {max_m} kg"
         );
-        assert!(
-            max_m <= 5000.0,
-            "search ceiling is 5000 kg, got {max_m}"
-        );
+        assert!(max_m <= 5000.0, "search ceiling is 5000 kg, got {max_m}");
     }
 
     #[test]

@@ -23,6 +23,22 @@ use crate::noise::*;
 pub const NT: usize = 1536; // samples around the drum
 pub const NZ: usize = 1024; // samples along the axis
 
+/// Worldgen knobs (droplet / tunnel counts).
+#[derive(Clone, Copy, Debug)]
+pub struct GenOpts {
+    pub droplets: u32,
+    pub tunnels: u32,
+}
+
+impl Default for GenOpts {
+    fn default() -> Self {
+        Self {
+            droplets: 520_000,
+            tunnels: 70,
+        }
+    }
+}
+
 pub struct Terrain {
     pub hab: Habitat,
     /// Elevation above hull floor, metres. Indexed [t + z * NT].
@@ -219,9 +235,12 @@ fn hash01_local(x: i32, y: i32, seed: u32) -> f32 {
     (h & 0x00FF_FFFF) as f32 / 16_777_215.0
 }
 
-
 impl Terrain {
     pub fn generate(hab: Habitat) -> Self {
+        Self::generate_ex(hab, GenOpts::default())
+    }
+
+    pub fn generate_ex(hab: Habitat, opts: GenOpts) -> Self {
         let mut elev = vec![0.0f32; NT * NZ];
         let s = hab.seed;
         let wl = hab.water_level;
@@ -264,7 +283,7 @@ impl Terrain {
         // Still runs once at generation to *shape* valleys. Live flow then
         // takes over for drainage that responds to the player.
         let mut rng = s ^ 0x1234_5678;
-        let droplets = 520_000;
+        let droplets = opts.droplets;
         for _ in 0..droplets {
             rng = rng.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
             let mut px = ((rng >> 8) % NT as u32) as f32;
@@ -333,12 +352,12 @@ impl Terrain {
             r2 = r2.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
             ((r2 >> 8) & 0xFFFF) as f32 / 65535.0
         };
-        for _ in 0..70 {
+        for _ in 0..opts.tunnels {
             let t0 = rnd() * std::f32::consts::TAU;
             let z0 = (rnd() * 0.7 + 0.15) * hab.length - hab.length * 0.5;
             let depth0 = 12.0 + rnd() * 40.0;
             let dt = (rnd() - 0.5) * 0.55;
-            let dz = (rnd() - 0.5) * 320.0;
+            let dz = (rnd() - 0.5) * (hab.length * 0.053).clamp(80.0, 320.0);
             let a = [t0, z0, hab.radius - depth0];
             let b = [t0 + dt, z0 + dz, hab.radius - (10.0 + rnd() * 46.0)];
             tunnels.push(Tunnel::new(&hab, a, b, 3.0 + rnd() * 4.5));
@@ -350,7 +369,7 @@ impl Terrain {
                 ];
                 let c = [
                     m[0] + (rnd() - 0.5) * 0.30,
-                    m[1] + (rnd() - 0.5) * 160.0,
+                    m[1] + (rnd() - 0.5) * (hab.length * 0.027).clamp(40.0, 160.0),
                     hab.radius - (8.0 + rnd() * 30.0),
                 ];
                 tunnels.push(Tunnel::new(&hab, m, c, 2.2 + rnd() * 2.4));
@@ -568,7 +587,8 @@ impl Terrain {
                 // Both ridges have to be inside the threshold for a tube to
                 // exist, and most rock is nowhere near one — so ask the first
                 // and only pay for the second when the answer is still open.
-                if let Some(a) = tube_dev(p[0] * s, p[1] * s, p[2] * s, self.hab.seed ^ 0xCAFE, thresh)
+                if let Some(a) =
+                    tube_dev(p[0] * s, p[1] * s, p[2] * s, self.hab.seed ^ 0xCAFE, thresh)
                 {
                     if let Some(b) = tube_dev(
                         p[0] * s + 31.7,
@@ -610,13 +630,7 @@ impl Terrain {
     /// The ground band a chunk has to mesh is decided by its own elevations,
     /// which is right for hillsides and caves but blind to artifact bores and
     /// to the shaft a player sank last night. Those are enumerated instead.
-    pub fn features_near(
-        &self,
-        th_c: f32,
-        z_c: f32,
-        half_arc: f32,
-        half_z: f32,
-    ) -> Vec<Feature> {
+    pub fn features_near(&self, th_c: f32, z_c: f32, half_arc: f32, half_z: f32) -> Vec<Feature> {
         let mut out: Vec<Feature> = Vec::new();
         let r0 = self.hab.radius;
         let mut push = |p: [f32; 3], reach: f32, out: &mut Vec<Feature>| {
@@ -769,6 +783,10 @@ impl Terrain {
         let cell_z = self.hab.length / NZ as f32;
         let r = ((radius / cell_t.min(cell_z)).ceil() as i32 + 3).max(6);
         self.flow.mark_dirty_at(ti, zi, r);
+    }
+
+    pub fn mark_flow_dirty_public(&mut self, c: [f32; 3], radius: f32) {
+        self.mark_flow_dirty_at(c, radius);
     }
 
     /// Lower or raise the elevation grid under a brush. This is what makes

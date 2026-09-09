@@ -251,11 +251,16 @@ static func _box(size: Vector3, col: Color) -> ArrayMesh:
 	return st.commit()
 
 static func _part(parent: Node3D, size: Vector3, col: Color, pos: Vector3,
-		mat: ShaderMaterial) -> MeshInstance3D:
+		mat: ShaderMaterial, tilt := 0.0) -> MeshInstance3D:
 	var mi := MeshInstance3D.new()
 	mi.mesh = _box(size, col)
 	mi.material_override = mat
 	mi.position = pos
+	# Roll about Z. Only the brows use it, and only slightly — but a box that
+	# cannot tilt cannot carry an expression, and everything above the nose is
+	# expression.
+	if not is_zero_approx(tilt):
+		mi.rotation = Vector3(0, 0, tilt)
 	parent.add_child(mi)
 	return mi
 
@@ -279,6 +284,9 @@ static func build(parent: Node3D, b: Dictionary, cast_shadow := true) -> Diction
 	var bottom: Color = b["bottom"]
 	var shoe: Color = b["shoe"]
 	var hair_col: Color = b["hair_col"]
+	# Hairy skin reads darker and warmer, not as a decal. Applied to the parts
+	# that are actually bare: forearms, hands and shins.
+	var fur_skin: Color = skin.lerp(hair_col, float(b["fur"]) * 0.30)
 	var rig := {"mat": mat, "measure": m, "body": b}
 
 	# --- pelvis -> spine -> chest ---
@@ -291,6 +299,11 @@ static func build(parent: Node3D, b: Dictionary, cast_shadow := true) -> Diction
 	# Seat. Reads only in profile, and profile is most of how a walk reads.
 	_part(hip, Vector3(m["hip_w"] * 0.98, m["torso_len"] * 0.17, m["glute_d"]),
 			bottom, Vector3(0, m["torso_len"] * 0.01, -m["belly_d"] * 0.34), mat)
+
+	# Belt: the line where top stops and bottom starts. Without it the torso
+	# was one unbroken column of colour from collar to knee.
+	_part(hip, Vector3(m["hip_w"] * 1.10, m["torso_len"] * 0.055, m["belly_d"] * 0.94),
+			bottom.darkened(0.34), Vector3(0, m["torso_len"] * 0.15, 0), mat)
 
 	var spine := Node3D.new()
 	spine.position = Vector3(0, m["torso_len"] * 0.14, 0)
@@ -316,11 +329,17 @@ static func build(parent: Node3D, b: Dictionary, cast_shadow := true) -> Diction
 			0.14 + 0.22 * float(b["soft"]))
 	_part(chest, Vector3(rib_w, m["chest_h"] * 0.98, m["chest_d"]),
 			top, Vector3(0, m["chest_h"] * 0.42, 0), mat)
-	# Pecs: a shelf on the front of the ribcage, proud by muscle and by soft.
-	_part(chest, Vector3(rib_w * 0.94, m["chest_h"] * 0.40,
-			m["chest_d"] * (0.22 + 0.30 * float(b["muscle"]) + 0.16 * float(b["soft"]))),
-			top.lightened(0.05),
-			Vector3(0, m["chest_h"] * 0.62, m["chest_d"] * 0.52), mat)
+	# Pecs: two of them, with a sternum gap. One full-width shelf across the
+	# ribcage put a hard horizontal seam from armpit to armpit, which read as
+	# the top edge of a breastplate rather than a chest — and nobody has a
+	# single pec. The gap costs one box and gives the torso a centre line.
+	var pec_d: float = m["chest_d"] * (0.22 + 0.30 * float(b["muscle"])
+			+ 0.16 * float(b["soft"]))
+	for side in [-1.0, 1.0]:
+		_part(chest, Vector3(rib_w * 0.44, m["chest_h"] * 0.40, pec_d),
+				top.lightened(0.05),
+				Vector3(side * rib_w * 0.25, m["chest_h"] * 0.62,
+						m["chest_d"] * 0.52), mat)
 	# Deltoid caps stand PROUD of the ribcage, and their outer edge IS the
 	# shoulder width — otherwise the number in `measure` never reaches the eye.
 	var dw: float = maxf((float(m["sh_w"]) - rib_w) * 0.5, float(m["sh_w"]) * 0.055)
@@ -334,11 +353,17 @@ static func build(parent: Node3D, b: Dictionary, cast_shadow := true) -> Diction
 			_part(chest, Vector3(rib_w * 0.46, m["chest_h"] * 0.30 * trap, m["chest_d"] * 0.62),
 					top.lightened(0.03),
 					Vector3(side * rib_w * 0.26, m["chest_h"] * (0.92 + 0.06 * trap), 0), mat)
-	if float(b["fur"]) > 0.35:
-		_part(chest, Vector3(m["waist_w"] * 0.52, m["chest_h"] * 0.44, 0.010),
-				hair_col.lerp(skin, 0.30),
-				Vector3(0, m["chest_h"] * 0.56, m["chest_d"] * 0.52
-						+ m["chest_d"] * (0.11 + 0.15 * float(b["muscle"]))), mat)
+	# Body hair shows where skin shows. It used to be a flat panel laid over the
+	# shirt at chest height, which read as a badge, a hole or a censor bar —
+	# never as hair, because clothed chests do not have visible hair. What is
+	# left is the tuft in the collar opening; the forearms and shins carry the
+	# rest, tinted below (`fur_skin`).
+	if float(b["fur"]) > 0.30:
+		var fv: float = float(b["fur"])
+		_part(chest, Vector3(rib_w * (0.16 + 0.10 * fv), m["chest_h"] * 0.13,
+						m["chest_d"] * 0.10),
+				hair_col.lerp(skin, 0.22),
+				Vector3(0, m["chest_h"] * 0.86, m["chest_d"] * 0.46), mat)
 
 	# --- neck -> head ---
 	var neck := Node3D.new()
@@ -347,6 +372,15 @@ static func build(parent: Node3D, b: Dictionary, cast_shadow := true) -> Diction
 	rig["neck"] = neck
 	_part(neck, Vector3(m["neck_w"], m["neck_h"], m["neck_w"] * 0.92),
 			skin, Vector3(0, m["neck_h"] * 0.5, 0), mat)
+	# A collar. `top` and `bottom` were colours painted onto the body boxes, so
+	# everyone read as a coloured mannequin rather than a dressed person. These
+	# few bands are the cheapest thing that says "clothing": each sits slightly
+	# proud of the part underneath, so it catches its own edge of light.
+	# Sized off the neck and kept ABOVE the shoulder line. At 1.42x neck width
+	# it dipped into the shoulders and stood proud of them, which on a
+	# thick-necked build read as a ruff rather than a collar.
+	_part(neck, Vector3(m["neck_w"] * 1.16, m["neck_h"] * 0.26, m["neck_w"] * 1.10),
+			top.darkened(0.12), Vector3(0, m["neck_h"] * 0.20, 0), mat)
 	var head := Node3D.new()
 	head.position = Vector3(0, m["neck_h"], 0)
 	neck.add_child(head)
@@ -361,18 +395,41 @@ static func build(parent: Node3D, b: Dictionary, cast_shadow := true) -> Diction
 	for side in [-1.0, 1.0]:
 		_part(head, Vector3(hw * 0.17, hh * 0.075, hd * 0.06), dark,
 				Vector3(side * hw * 0.23, hh * 0.615, hd * 0.5), mat)
+	# Brows. The single cheapest piece of expression on a box head: two eyes
+	# alone read as a mannequin staring, because a face is mostly what sits
+	# above the eyes. Angled from `soft` rather than a new axis — a lean face
+	# gets an inward, harder set, a soft one gets a flatter, kinder brow.
+	var brow_tilt: float = lerpf(0.20, 0.04, float(b["soft"]))
+	var brow_col: Color = hair_col.darkened(0.05)
+	for side in [-1.0, 1.0]:
+		_part(head, Vector3(hw * 0.24, hh * 0.055, hd * 0.07), brow_col,
+				Vector3(side * hw * 0.23, hh * 0.695, hd * 0.5), mat,
+				side * brow_tilt)
 	_part(head, Vector3(hw * 0.17, hh * 0.16, hd * 0.14), skin.lightened(0.04),
 			Vector3(0, hh * 0.505, hd * 0.52), mat)
+	# A mouth, unless a full beard has covered it.
+	if float(b["beard"]) < 0.55:
+		_part(head, Vector3(hw * 0.30, hh * 0.038, hd * 0.05),
+				skin.darkened(0.45),
+				Vector3(0, hh * 0.335, hd * 0.5), mat)
 	if float(b["beard"]) > 0.12:
 		var bv: float = float(b["beard"])
 		# A shell around the jaw, not a bar hanging off the chin. It leaves the
 		# eyes and the bridge of the nose clear, which is what a beard does.
-		_part(head, Vector3(hw * 1.03, hh * (0.20 + 0.26 * bv), hd * 1.03),
-				hair_col.darkened(0.10),
-				Vector3(0, hh * (0.22 - 0.05 * bv), 0), mat)
-		_part(head, Vector3(hw * 0.62, hh * (0.10 + 0.16 * bv), hd * 0.14),
-				hair_col.darkened(0.10),
-				Vector3(0, hh * 0.40, hd * 0.50), mat)
+		# Proud of the jaw, not flush with it. At head width the shell sat
+		# exactly on the skull's outline, so even a full beard read as a smudge
+		# of darker skin rather than hair — the silhouette never changed. It
+		# now overhangs, and hangs BELOW the chin as it fills in, which is the
+		# part you see against a bright background.
+		var jut: float = 1.04 + 0.10 * bv
+		var drop: float = hh * (0.06 + 0.20 * bv)
+		var beard_col: Color = hair_col.darkened(0.22)
+		_part(head, Vector3(hw * jut, hh * (0.22 + 0.30 * bv) + drop, hd * jut),
+				beard_col,
+				Vector3(0, hh * (0.20 - 0.06 * bv) - drop * 0.5, 0), mat)
+		# Moustache, kept separate so it stays put as the beard grows.
+		_part(head, Vector3(hw * 0.64, hh * (0.09 + 0.10 * bv), hd * 0.16),
+				beard_col, Vector3(0, hh * 0.40, hd * 0.52), mat)
 	if float(b["hair"]) > 0.06:
 		var hv: float = float(b["hair"])
 		# A cap ON TOP of the skull. Sitting it at 0.86 of head height put a
@@ -391,8 +448,15 @@ static func build(parent: Node3D, b: Dictionary, cast_shadow := true) -> Diction
 	for side in [-1.0, 1.0]:
 		var key: int = int(side)
 		var clav := Node3D.new()
-		clav.position = Vector3(side * (float(m["sh_w"]) * 0.5 - float(m["arm_g"]) * 0.46),
-				m["chest_h"] * 0.72, 0)
+		# Hang the arm off the shoulder, but never inside the ribcage. Rooting
+		# it purely from shoulder width put the inner face of the upper arm
+		# behind the ribs on any build that does not taper — so a bear's arms
+		# vanished into his torso and he read as one brown mass. The notch
+		# between arm and body is most of what makes a limb legible.
+		var arm_x: float = maxf(
+				float(m["sh_w"]) * 0.5 - float(m["arm_g"]) * 0.46,
+				rib_w * 0.5 + float(m["arm_g"]) * 0.5 - float(m["arm_g"]) * 0.18)
+		clav.position = Vector3(side * arm_x, m["chest_h"] * 0.72, 0)
 		chest.add_child(clav)
 		rig["clav%d" % key] = clav
 		var upper := Node3D.new()
@@ -400,22 +464,35 @@ static func build(parent: Node3D, b: Dictionary, cast_shadow := true) -> Diction
 		rig["arm%d" % key] = upper
 		_part(upper, Vector3(m["arm_g"], m["arm_len"], m["arm_g"] * 0.92),
 				top.lerp(skin, 0.25), Vector3(0, -m["arm_len"] * 0.5, 0), mat)
+		# Cuff: where the sleeve ends and the arm begins. The sleeve/skin colour
+		# change alone read as a paint join, not a garment edge.
+		_part(upper, Vector3(m["arm_g"] * 1.10, m["arm_len"] * 0.10,
+						m["arm_g"] * 1.02),
+				top.darkened(0.16), Vector3(0, -m["arm_len"] * 0.94, 0), mat)
 		var fore := Node3D.new()
 		fore.position = Vector3(0, -m["arm_len"], 0)
 		upper.add_child(fore)
 		rig["fore%d" % key] = fore
 		_part(fore, Vector3(m["fore_g"], m["fore_len"], m["fore_g"] * 0.92),
-				skin, Vector3(0, -m["fore_len"] * 0.5, 0), mat)
+				fur_skin, Vector3(0, -m["fore_len"] * 0.5, 0), mat)
 		var hand := Node3D.new()
 		hand.position = Vector3(0, -m["fore_len"], 0)
 		fore.add_child(hand)
 		rig["hand%d" % key] = hand
-		_part(hand, Vector3(m["fore_g"] * 0.96, m["hand_l"], m["fore_g"] * 0.55),
-				skin, Vector3(0, -m["hand_l"] * 0.5, 0), mat)
+		# Wider than the forearm and squarer in plan, or a hand is just a small
+		# pale cube floating at hip height and reads as a pocket.
+		_part(hand, Vector3(m["fore_g"] * 1.12, m["hand_l"], m["fore_g"] * 0.78),
+				fur_skin, Vector3(0, -m["hand_l"] * 0.5, 0), mat)
 
 		# --- legs: thigh -> shin -> foot ---
 		var thigh := Node3D.new()
-		thigh.position = Vector3(side * m["hip_w"] * 0.30, 0, 0)
+		# Keep a gap between the legs whatever the girth. Rooted at a fixed
+		# share of hip width, a heavy build's thighs overlapped each other and
+		# the two of them fused into one slab from hip to ankle — the shape of
+		# a long skirt, with feet poking out under the hem.
+		var stand: float = maxf(float(m["hip_w"]) * 0.30,
+				float(m["thigh_g"]) * 0.5 + float(m["stature"]) * 0.016)
+		thigh.position = Vector3(side * stand, 0, 0)
 		hip.add_child(thigh)
 		rig["thigh%d" % key] = thigh
 		_part(thigh, Vector3(m["thigh_g"], m["thigh"], m["thigh_g"] * 0.94),
@@ -430,8 +507,18 @@ static func build(parent: Node3D, b: Dictionary, cast_shadow := true) -> Diction
 		foot.position = Vector3(0, -m["shin"], 0)
 		shin.add_child(foot)
 		rig["foot%d" % key] = foot
+		# Trouser hem, then the shoe, then a sole under it. Three tones over
+		# 12 cm is what stops the leg ending in a single flat tab.
+		_part(shin, Vector3(m["shin_g"] * 1.12, m["shin"] * 0.10, m["shin_g"] * 1.06),
+				bottom.darkened(0.22), Vector3(0, -m["shin"] * 0.93, 0), mat)
 		_part(foot, Vector3(m["foot_w"], m["foot_h"], m["foot_l"]),
 				shoe, Vector3(0, -m["foot_h"] * 0.5, m["foot_l"] * 0.18), mat)
+		# Tucked under the shoe, not overhanging it — a sole longer than the
+		# shoe reads as a blade sticking out at the toe.
+		_part(foot, Vector3(m["foot_w"] * 1.02, m["foot_h"] * 0.26,
+						m["foot_l"] * 0.94),
+				shoe.darkened(0.40),
+				Vector3(0, -m["foot_h"] * 0.87, m["foot_l"] * 0.18), mat)
 
 	var shadow: GeometryInstance3D.ShadowCastingSetting = \
 			GeometryInstance3D.SHADOW_CASTING_SETTING_ON if cast_shadow \

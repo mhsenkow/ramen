@@ -235,3 +235,121 @@ inputs = [
   { material = "tare", mass_kg = 0.4 },
 ]
 outputs = [{ material = "rich ramen", mass_kg = 5.0 }]
+
+# --- Foraged produce (splits the old catch-all `greens` pool) --------------
+
+[[recipe]]
+id = "simmer_veg_broth"
+station = "kitchen"
+energy_kj = 40.0
+time_s = 60.0
+o2_kg = 0.3
+co2_kg = 0.4
+inputs = [
+  { material = "vegetables", mass_kg = 2.5 },
+  { material = "bone meal", mass_kg = 1.0 },
+]
+outputs = [
+  { material = "broth", mass_kg = 3.0 },
+  { material = "gas_loss", mass_kg = 0.5 },
+]
+
+[[recipe]]
+id = "fruit_tare"
+station = "kitchen"
+energy_kj = 20.0
+time_s = 40.0
+o2_kg = 0.2
+co2_kg = 0.25
+inputs = [
+  { material = "fruit", mass_kg = 2.0 },
+  { material = "ash", mass_kg = 0.3 },
+]
+outputs = [
+  { material = "tare", mass_kg = 1.9 },
+  { material = "gas_loss", mass_kg = 0.4 },
+]
+
+[[recipe]]
+id = "bowl_veg_ramen"
+station = "kitchen"
+energy_kj = 35.0
+time_s = 20.0
+o2_kg = 0.15
+co2_kg = 0.15
+inputs = [
+  { material = "noodles", mass_kg = 1.5 },
+  { material = "broth", mass_kg = 2.0 },
+  { material = "vegetables", mass_kg = 0.8 },
+  { material = "oil", mass_kg = 0.3 },
+  { material = "tare", mass_kg = 0.4 },
+]
+outputs = [{ material = "rich ramen", mass_kg = 5.0 }]
+
+[[recipe]]
+id = "steep_tea"
+station = "kitchen"
+energy_kj = 12.0
+time_s = 45.0
+o2_kg = 0.0
+co2_kg = 0.05
+inputs = [
+  { material = "flowers", mass_kg = 0.6 },
+  { material = "water", mass_kg = 2.0 },
+]
+outputs = [
+  { material = "tea", mass_kg = 2.4 },
+  { material = "gas_loss", mass_kg = 0.2 },
+]
+
+[[recipe]]
+id = "thatch_bundle"
+station = "mill"
+energy_kj = 8.0
+time_s = 25.0
+o2_kg = 0.0
+co2_kg = 0.0
+inputs = [
+  { material = "grass", mass_kg = 6.0 },
+  { material = "fibre", mass_kg = 1.0 },
+]
+outputs = [{ material = "thatch", mass_kg = 7.0 }]
+
+# --- Dug coal and molten rock ---------------------------------------------
+
+[[recipe]]
+id = "smelt_ferrous_coal"
+station = "smelter"
+energy_kj = 760.0
+time_s = 110.0
+o2_kg = 9.0
+co2_kg = 13.0
+inputs = [
+  { material = "ferrous ore", mass_kg = 20.0 },
+  { material = "coal", mass_kg = 4.0 },
+]
+outputs = [
+  { material = "iron", mass_kg = 8.6 },
+  { material = "slag", mass_kg = 12.0 },
+  { material = "gas_loss", mass_kg = 3.4 },
+]
+
+[[recipe]]
+id = "melt_basalt"
+station = "smelter"
+energy_kj = 1400.0
+time_s = 180.0
+o2_kg = 1.0
+co2_kg = 1.4
+inputs = [{ material = "basalt", mass_kg = 8.0 }]
+outputs = [{ material = "molten rock", mass_kg = 8.0 }]
+
+[[recipe]]
+id = "cast_basalt"
+station = "kiln"
+energy_kj = 30.0
+time_s = 240.0
+o2_kg = 0.0
+co2_kg = 0.0
+inputs = [{ material = "molten rock", mass_kg = 8.0 }]
+outputs = [{ material = "basalt", mass_kg = 8.0 }]

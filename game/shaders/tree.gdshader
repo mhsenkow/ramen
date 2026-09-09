@@ -25,6 +25,11 @@ uniform float fade_end = 450.0;
 // where the block sits in a crown. Those multimeshes pass the height fraction
 // in CUSTOM.x instead; every authored tree mesh keeps reading its own vertices.
 uniform bool up_from_instance = false;
+// Complementary dither in the same distance band: never hide a whole tier.
+uniform bool proxy = false;
+uniform bool material_grid = false;
+varying float v_resident;
+varying float v_edited;
 // Metres the 0-1 crown gradient spans — must match woodscape::CROWN_SPAN.
 uniform float crown_span = 22.0;
 
@@ -37,9 +42,12 @@ varying float v_greenish;
 varying float v_contact;
 
 void vertex() {
+	v_resident = INSTANCE_CUSTOM.x;
+	v_edited = material_grid ? UV.x : 0.0;
 	v_up = up_from_instance
 			? clamp(INSTANCE_CUSTOM.x, 0.0, 1.0)
-			: clamp(VERTEX.y / model_height, 0.0, 1.0);
+			: clamp(VERTEX.y * length(MODEL_MATRIX[1].xyz) / crown_span, 0.0, 1.0);
+	if (material_grid) { v_up = UV.y; }
 	vec3 local = VERTEX;
 
 	vec3 origin = (MODEL_MATRIX * vec4(0.0, 0.0, 0.0, 1.0)).xyz;
@@ -61,6 +69,11 @@ void vertex() {
 void fragment() {
 	float dist = length(w_pos - CAMERA_POSITION_WORLD);
 	float tf = smoothstep(fade_start, fade_end, dist);
+	if (material_grid && v_edited > 0.5) { tf = smoothstep(400.0, 480.0, dist); } // feature: edited stands retire with the 400–480 m forest band
+	if (proxy && v_resident > 0.5) {
+		float incoming = smoothstep(55.0, 85.0, dist);
+		if (rama_dither_near(FRAGCOORD.xy, incoming)) { discard; }
+	}
 	if (rama_dither_far(FRAGCOORD.xy, tf)) { discard; }
 
 	vec3 N = normalize(w_nrm);
@@ -79,8 +92,9 @@ void fragment() {
 	vec3 albedo = leaf;
 	float key = v_col.a;
 	if (key < 0.75) {
-		vec3 solid = srgb_to_linear(mix(bark_tint, fruit_tint, smoothstep(0.15, 0.5, key))
-				* dot(v_col.rgb, vec3(0.35, 0.42, 0.23)) * 2.6);
+		// source_color uniforms already arrive in linear space. Converting them
+		// again crushed the bark into black silhouettes.
+		vec3 solid = mix(bark_tint, fruit_tint, smoothstep(0.15, 0.5, key)) * 0.90;
 		albedo = mix(solid, leaf, smoothstep(0.5, 0.75, key));
 	}
 	float foliage = smoothstep(0.58, 0.82, key);

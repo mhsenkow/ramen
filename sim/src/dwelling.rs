@@ -240,7 +240,8 @@ fn site_scores(elev: &[f32], ti: usize, zi: usize, hab: &Habitat) -> (f32, f32, 
     let city_w = prov.weight(crate::province::id::CITY);
 
     // Delve wants height and steepness — ground nobody wants to plough.
-    let delve = (band - 0.42).max(0.0) * 2.4 + (s - 0.22).max(0.0) * 3.0 - farm_w * 0.8 - city_w * 1.1;
+    let delve =
+        (band - 0.42).max(0.0) * 2.4 + (s - 0.22).max(0.0) * 3.0 - farm_w * 0.8 - city_w * 1.1;
     // Terrace wants workable slope in the middle band — thrives on farmland.
     let terrace = (1.0 - (band - 0.30).abs() * 3.6).max(0.0)
         + (1.0 - (s - 0.16).abs() * 6.0).max(0.0)

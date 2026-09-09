@@ -39,8 +39,8 @@ var last_aim := {}
 ## same amounts — if these drift the fill button silently falls back to dirt.
 const MAT_GREEN := 100
 const MAT_WOOD := 101
-const WOOD_BLOCK_KG := 2.5
-const LEAF_BLOCK_KG := 0.4
+const WOOD_BLOCK_KG := 2.8
+const LEAF_BLOCK_KG := 0.455
 var can_dig := true
 var ghost: Node3D
 var level_brush := false
@@ -67,6 +67,10 @@ const ZOOM_MIN := 0.0
 const ZOOM_MAX := 7.5
 
 var module := 0
+## Seconds left showing the placement ghost after picking a module, so choosing
+## one previews where it lands without pinning the overlay on screen forever.
+var module_shown := 0.0
+const MODULE_PREVIEW_S := 2.5
 var brush := 2.6
 var recipe_idx := 0
 var highlight: MeshInstance3D
@@ -245,10 +249,10 @@ func _input(e: InputEvent) -> void:
 			KEY_1: speed_gear = 0; world.note("speed 1 — stroll")
 			KEY_2: speed_gear = 1; world.note("speed 2 — run")
 			KEY_3: speed_gear = 2; world.note("speed 3 — cross-drum")
-			KEY_4: module = 0
-			KEY_5: module = 1
-			KEY_6: module = 2
-			KEY_7: module = 3
+			KEY_4: module = 0; module_shown = MODULE_PREVIEW_S
+			KEY_5: module = 1; module_shown = MODULE_PREVIEW_S
+			KEY_6: module = 2; module_shown = MODULE_PREVIEW_S
+			KEY_7: module = 3; module_shown = MODULE_PREVIEW_S
 			KEY_F:
 				_edit(true)
 			KEY_G:
@@ -282,13 +286,98 @@ func _edit(remove: bool) -> void:
 	if not hit.get("hit", false):
 		return
 	var p: Vector3 = hit["point"] if remove else hit["air"]
+	# Guest: send intent to host; do not mutate local authority.
+	if world.session and world.session.joined:
+		if not world.session.can_dig():
+			world.note("Host has not granted dig permission (Esc → CO-OP).")
+			return
+		if remove:
+			world.session.request_dig(p, brush, world.DIG_SNAP, level_brush, true)
+		else:
+			var inv: Dictionary = _inv_for_me()
+			var have_wood := 0.0
+			var have_leaf := 0.0
+			for s in inv.get("stacks", []):
+				var mid: int = int(s.get("material_id", -1))
+				if mid == MAT_WOOD:
+					have_wood = float(s.get("mass_kg", 0.0))
+				elif mid == MAT_GREEN:
+					have_leaf = float(s.get("mass_kg", 0.0))
+			if have_wood >= WOOD_BLOCK_KG or have_leaf >= LEAF_BLOCK_KG:
+				var as_leaf: bool = have_wood < WOOD_BLOCK_KG and have_leaf >= LEAF_BLOCK_KG
+				world.session.request_place_veg(p, as_leaf)
+			else:
+				world.session.request_dig(p, brush * 0.8, world.DIG_SNAP, level_brush, false)
+		return
 	if remove:
 		var y: Dictionary = world.terrain.dig(p, brush, world.DIG_SNAP, level_brush)
 		if not y.get("ok", false):
 			return
-		world.terrain.notify_dig(p, brush)
-		world.schedule_pool_refresh()
+		if not hit.get("vegetation", false):
+			world.terrain.notify_dig(p, brush)
+			world.schedule_pool_refresh()
 		world.schedule_stockpile_refresh()
+		var blocks: int = int(y.get("blocks", 0))
+		if bool(y.get("vegetation", false)) and blocks > 0:
+			# Say what came away, since dig no longer fells whole trees and
+			# there was no message at all before.
+			world.refresh_woodscape(true)
+			var got := 0.0
+			var what := "leaves"
+			for part in y.get("parts", []):
+				var mid: int = int(part.get("material_id", -1))
+				if mid == MAT_WOOD:
+					got += float(part.get("mass_kg", 0.0))
+					what = "timber"
+				elif mid == MAT_GREEN:
+					got += float(part.get("mass_kg", 0.0))
+			# Block count, because the size of the bite is the thing the brush
+			# control is for and mass alone does not show it — leaves weigh
+			# almost nothing however many you clear.
+			var bite := "%d blocks" % blocks if blocks > 1 else "1 block"
+			# Wood the cut left unsupported came down on its own. Say so
+			# separately: it is a pile at the foot of the tree, not something
+			# the swing put in your pack, and it can be tonnes.
+			var fell_kg: float = float(y.get("felled_kg", 0.0))
+			if fell_kg > 0.5:
+				world.refresh_stockpiles()
+				world.force_plant_refresh()
+				world.note("%s · %.0f kg came down · L to take" % [bite, fell_kg])
+				if world.audio:
+					world.audio.dig(4.0, 0.75)
+				world.spawn_dig_chips(p, hit.get("normal", Vector3.UP),
+						int(y.get("felled_blocks", 0)), true)
+				last_aim["yield_kg"] = float(y.get("mass_kg", 0.0))
+				last_aim["yield_accepted"] = float(y.get("accepted", 1.0))
+				return
+			if float(y.get("accepted", 1.0)) < 0.95:
+				world.refresh_stockpiles()
+				world.note("%s · pack full · %s piled · L to take" % [bite, what])
+			else:
+				world.note("%s · +%.1f kg %s" % [bite, got, what])
+			last_aim["yield_kg"] = float(y.get("mass_kg", 0.0))
+			last_aim["yield_accepted"] = float(y.get("accepted", 1.0))
+			if world.audio:
+				# Wood, not rock, and no terrain rebuild — nothing moved but
+				# blocks. Skipping `rebuild_around` is the point of the branch.
+				#
+				# Scaled by what the swing actually took: a great axe through a
+				# canopy and a notch out of a sapling made exactly the same
+				# sound, which flattened the whole size control to cosmetics.
+				var heft: float = clampf(pow(float(blocks), 0.34), 1.0, 4.5)
+				world.audio.dig(heft, 0.62 if what == "timber" else 0.3)
+			world.spawn_dig_chips(p, hit.get("normal", Vector3.UP), blocks,
+					what == "timber")
+			if world.session and world.session.hosting:
+				world.session._flush_host_events()
+			return
+		# Ice does not survive being lifted out of the ground in a temperate
+		# province: it arrives as meltwater at your feet.
+		var melt: float = float(y.get("meltwater_l", 0.0))
+		if melt > 1.0:
+			world.schedule_pool_refresh()
+			world.note("meltwater · %.0f L released" % melt)
+			world.spawn_dig_splash(p, clampf(melt / 120.0, 0.5, 3.0))
 		var trees: int = int(y.get("trees", 0))
 		if trees > 0:
 			world.force_plant_refresh()
@@ -297,13 +386,13 @@ func _edit(remove: bool) -> void:
 			var timber: float = float(y.get("timber_kg", 0.0))
 			var kept: float = float(y.get("timber_kept", timber))
 			if kept > 0.05 and kept + 0.05 >= timber:
-				world.note("felled · +%.0f kg timber in pack" % kept)
+				world.note("harvested · +%.0f kg timber in pack" % kept)
 			elif kept > 0.05:
-				world.note("felled · +%.0f kg pack · rest piled · L to take" % kept)
+				world.note("harvested · +%.0f kg pack · rest piled · L to take" % kept)
 			elif timber > 0.05:
 				world.note("pack full · timber piled · L to take")
 			else:
-				world.note("felled tree")
+				world.note("harvested leaf material")
 		elif float(y.get("accepted", 1.0)) < 0.95:
 			world.refresh_stockpiles()
 			world.note("pack full · spoil piled · L to take")
@@ -316,25 +405,26 @@ func _edit(remove: bool) -> void:
 	else:
 		# Prefer placing timber/leaf from pack — blocks combine with neighbours.
 		var placed := false
-		var inv: Dictionary = world.terrain.inventory()
-		var have_wood := 0.0
-		var have_leaf := 0.0
-		for s in inv.get("stacks", []):
-			var mid: int = int(s.get("material_id", -1))
-			if mid == MAT_WOOD:
-				have_wood = float(s.get("mass_kg", 0.0))
-			elif mid == MAT_GREEN:
-				have_leaf = float(s.get("mass_kg", 0.0))
-		if have_wood >= WOOD_BLOCK_KG or have_leaf >= LEAF_BLOCK_KG:
-			var as_leaf: bool = have_wood < WOOD_BLOCK_KG and have_leaf >= LEAF_BLOCK_KG
-			var pv: Dictionary = world.terrain.place_veg_block(p, as_leaf)
+		var inv2: Dictionary = _inv_for_me()
+		var have_wood2 := 0.0
+		var have_leaf2 := 0.0
+		for s2 in inv2.get("stacks", []):
+			var mid2: int = int(s2.get("material_id", -1))
+			if mid2 == MAT_WOOD:
+				have_wood2 = float(s2.get("mass_kg", 0.0))
+			elif mid2 == MAT_GREEN:
+				have_leaf2 = float(s2.get("mass_kg", 0.0))
+		if have_wood2 >= WOOD_BLOCK_KG or have_leaf2 >= LEAF_BLOCK_KG:
+			var as_leaf2: bool = have_wood2 < WOOD_BLOCK_KG and have_leaf2 >= LEAF_BLOCK_KG
+			var pv: Dictionary = world.terrain.place_veg_block(p, as_leaf2)
 			if pv.get("ok", false):
 				placed = true
 				world.refresh_woodscape(true)
 				world.note("placed %s · combines with neighbours" % str(pv.get("kind", "block")))
 		if not placed:
 			world.terrain.fill(p, brush * 0.8, world.DIG_SNAP, level_brush)
-	world.rebuild_around(p, brush * (2.0 if level_brush else 1.0) + 2.0)
+	if not hit.get("vegetation", false):
+		world.rebuild_around(p, brush * (2.0 if level_brush else 1.0) + 2.0)
 	if world.audio:
 		var hard := 1.0
 		var pr: Dictionary = world.terrain.probe(p)
@@ -342,14 +432,30 @@ func _edit(remove: bool) -> void:
 		world.audio.dig(brush, hard)
 		if world.playtest:
 			world.playtest_mark("dig")
+	if world.session and world.session.hosting:
+		world.session._flush_host_events()
+
+func _inv_for_me() -> Dictionary:
+	if world.session and world.session.is_online() and world.session.has_method("inventory_snapshot"):
+		var snap: Dictionary = world.session.inventory_snapshot()
+		if not snap.is_empty():
+			return snap
+	if world.terrain.has_method("inventory_for") and world.session and world.session.is_online():
+		return world.terrain.inventory_for(world.session.local_actor())
+	return world.terrain.inventory()
 
 func _build() -> void:
+	if world.session and world.session.joined and not world.session.can_build():
+		world.note("Host has not granted build permission.")
+		return
 	var hit: Dictionary = aim()
 	if not hit.get("hit", false):
 		return
 	world.place_module(hit["point"], module)
 	if world.audio:
 		world.audio.place()
+	if world.session and world.session.hosting:
+		world.session._flush_host_events()
 
 func _undo() -> void:
 	var hit: Dictionary = world.terrain.undo_dig()
@@ -391,7 +497,7 @@ func _bottle_water() -> void:
 		zz = p.z
 		splash_p = p
 	var depth: float = world.terrain.water_depth_at(th, zz)
-	var inv: Dictionary = world.terrain.inventory()
+	var inv: Dictionary = _inv_for_me()
 	var have_water := 0.0
 	for s in inv.get("stacks", []):
 		if int(s.get("material_id", -1)) == 104:
@@ -451,7 +557,7 @@ func _physics_process(dt: float) -> void:
 	_enc_age += dt
 	if _enc_age > 0.25 and world.terrain:
 		_enc_age = 0.0
-		var inv: Dictionary = world.terrain.inventory()
+		var inv: Dictionary = _inv_for_me()
 		_enc_cache = float(inv.get("encumbrance", 1.0))
 	var enc: float = _enc_cache
 	var gix: int = clampi(speed_gear, 0, 2)
@@ -670,20 +776,27 @@ func _actions(dt: float) -> void:
 	if Input.is_action_just_pressed(A.act("throw")):
 		_throw()
 	if Input.is_action_just_pressed(A.act("harvest")):
+		if world.session and world.session.joined:
+			if world.session.can_work():
+				world.session.request_harvest(theta, z, 5.5)
+			else:
+				world.note("Host has not granted work permission.")
+			return
 		var hy: Dictionary = world.terrain.harvest_near(theta, z, 5.5)
 		if hy.get("ok", false):
-			world.refresh_stockpiles()
 			world.force_plant_refresh()
-			var timber: float = float(hy.get("timber_kg", 0.0))
-			var kg: float = float(hy.get("mass_kg", 0.0))
-			if timber > 0.05:
-				world.note("felled · +%.0f kg timber" % timber)
+			world.refresh_stockpiles()
+			world.refresh_woodscape(true)
+			var timber_h: float = float(hy.get("timber_kg", 0.0))
+			if timber_h > 0.05:
+				world.note("harvested · +%.0f kg timber" % timber_h)
 			else:
-				world.note("harvested · +%.1f kg" % kg)
-			if world.audio:
-				world.audio.dig(1.2, 0.6)
+				world.note("harvested")
+			if world.session and world.session.hosting:
+				world.session._flush_host_events()
 		else:
-			world.note("no tree in reach")
+			world.note("nothing to harvest")
+		return
 	if Input.is_action_pressed(A.act("bottle")):
 		_bottle_water()
 	if Input.is_action_just_pressed(A.act("take")):
@@ -716,16 +829,24 @@ func _actions(dt: float) -> void:
 		else:
 			var craft_scale: float = float(rec.get("max_scale", 0.0))
 			if craft_scale >= 0.05:
-				var cr: Dictionary = world.terrain.craft(recipe_idx, craft_scale, theta, z)
-				if cr.get("ok", false):
-					world.refresh_stockpiles()
-					if world.audio:
-						world.audio.place()
-					print("[rama] craft %s ×%.2f  O₂ −%.1f  CO₂ +%.1f" % [
-						cr.get("id", "?"), float(cr.get("scale", 0.0)),
-						float(cr.get("o2_used", 0.0)), float(cr.get("co2_made", 0.0))])
-				elif str(cr.get("error", "")) == "need_station":
-					print("[rama] need %s station nearby" % str(cr.get("station", "?")))
+				if world.session and world.session.joined:
+					if world.session.can_work():
+						world.session.request_craft(recipe_idx, craft_scale, theta, z)
+					else:
+						world.note("Host has not granted work permission.")
+				else:
+					var cr: Dictionary = world.terrain.craft(recipe_idx, craft_scale, theta, z)
+					if cr.get("ok", false):
+						world.refresh_stockpiles()
+						if world.audio:
+							world.audio.place()
+						print("[rama] craft %s ×%.2f  O₂ −%.1f  CO₂ +%.1f" % [
+							cr.get("id", "?"), float(cr.get("scale", 0.0)),
+							float(cr.get("o2_used", 0.0)), float(cr.get("co2_made", 0.0))])
+						if world.session and world.session.hosting:
+							world.session._flush_host_events()
+					elif str(cr.get("error", "")) == "need_station":
+						print("[rama] need %s station nearby" % str(cr.get("station", "?")))
 	if Input.is_action_just_pressed(A.act("eat")):
 		var em: Dictionary = world.terrain.eat_meal()
 		if em.get("ok", false):
@@ -751,8 +872,8 @@ func _actions(dt: float) -> void:
 		else:
 			print("[rama] place %s failed: %s" % [st, str(ps.get("error", "?"))])
 	if Input.is_action_just_pressed(A.act("amend")):
+		var inv: Dictionary = _inv_for_me()
 		# Prefer ash → lime → manure → bone meal from whatever is in the pack.
-		var inv: Dictionary = world.terrain.inventory()
 		var prefer := [115, 116, 120, 121]  # ash, lime, manure, bone meal
 		var chosen := -1
 		for s in inv.get("stacks", []):
@@ -807,8 +928,10 @@ func _actions(dt: float) -> void:
 	for i in 4:
 		if Input.is_action_just_pressed(A.act("mod%d" % (i + 1))):
 			module = i
+			module_shown = MODULE_PREVIEW_S
 	dig_cd -= dt
 	bottle_cd -= dt
+	module_shown = maxf(module_shown - dt, 0.0)
 	var digging: bool = Input.is_action_pressed(A.act("dig"))
 	var filling: bool = Input.is_action_pressed(A.act("fill"))
 	world.dig_held = digging or filling
@@ -825,7 +948,11 @@ func _refresh_aim() -> void:
 	if hit.get("hit", false):
 		var pr: Dictionary = world.terrain.probe(hit["point"])
 		can_dig = bool(pr.get("diggable", true))
-		last_aim["kind"] = pr.get("kind", "")
+		if hit.get("vegetation", false):
+			can_dig = true
+			last_aim["kind"] = hit.get("kind", "timber")
+		else:
+			last_aim["kind"] = pr.get("kind", "")
 	# Heap under your feet, read here rather than from the reticle's _draw:
 	# the reticle redraws every frame, and this walks the whole heap list.
 	last_aim["heap"] = world.terrain.heap_in_reach(theta, z, 3.5)
@@ -836,14 +963,28 @@ func _refresh_aim() -> void:
 		if show_brush:
 			# Show the brush's actual shape: a sphere, or the disc the
 			# levelling brush cuts. A sphere marker on a disc brush is a lie.
-			var pt: Vector3 = hit["point"]
+			#
+			# On vegetation it also has to show the bite that will actually
+			# come away — wood resists, so the axe takes a fraction of the
+			# brush — centred in the block rather than on the face the ray
+			# struck. Drawing the full sphere on the skin of a trunk promised
+			# an armful and delivered a notch.
+			var veg: bool = hit.get("vegetation", false)
+			var pt: Vector3 = hit.get("bite_at", hit["point"]) if veg else hit["point"]
+			var r: float = brush * (float(hit.get("bite_scale", 1.0)) if veg else 1.0)
 			var radial := Vector3(-pt.x, -pt.y, 0.0).normalized()
 			var ax := Vector3(0, 0, 1)
 			var rt := radial.cross(ax).normalized()
 			highlight.transform = Transform3D(Basis(rt, radial, ax), pt)
-			highlight.scale = Vector3(brush, 0.22 if level_brush else brush, brush)
+			highlight.scale = Vector3(r, 0.22 if level_brush and not veg else r, r)
 	if ghost:
-		var show_ghost: bool = hit.get("hit", false) and view == 0 \
+		# Only while you are actually placing. This had no mode gate at all, so
+		# the module ghost — a 9 x 9 m farm bed by default — sat translucent
+		# over the middle of the screen the entire game, on top of the dig
+		# brush sphere. Two big overlays permanently in the sight line.
+		var arming: bool = Input.is_action_pressed(RamaControls.act("place")) \
+			or module_shown > 0.0
+		var show_ghost: bool = arming and hit.get("hit", false) and view == 0 \
 			and not RamaControls.photo_mode
 		ghost.visible = show_ghost
 		if show_ghost:

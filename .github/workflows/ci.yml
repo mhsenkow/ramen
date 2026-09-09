@@ -4,6 +4,10 @@ on:
   push:
   pull_request:
 
+env:
+  # Keep in step with release.yml — the gate must run the engine that ships.
+  GODOT_VERSION: "4.6.2"
+
 jobs:
   craft-gates:
     runs-on: ubuntu-latest
@@ -29,6 +33,35 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+
+      # `cargo test --lib` never compiles src/bin/bench.rs, which re-declares
+      # every module with #[path]. Any new file in sim/src/ therefore breaks a
+      # target nothing in the normal loop builds — it shipped twice in one week
+      # (woodscape, then far_field + tree_form).
+      #
+      # `check`, not `test --all-targets`: bench re-includes each module's
+      # #[cfg(test)] block, so testing all targets runs the whole suite a second
+      # time inside the bench binary — 55 duplicate tests, including the 38 s
+      # nitrogen invariant. Compilation coverage is what is missing, and it is
+      # platform-independent, so it does not need repeating on macOS.
+      - name: Compile every target (bins included)
+        run: cargo check --all-targets --locked
+
+      # Formatting is now clean, so it can be a gate. Kept as its own step so a
+      # reformat is never mistaken for a behaviour change in review.
+      - name: Formatting
+        run: cargo fmt --check
+
+      # Correctness and suspicious groups only, not `-D warnings`.
+      #
+      # There are ~190 style and pedantic findings in this crate; denying all of
+      # them would mean either a large unrelated cleanup or a gate nobody can
+      # keep green, and a gate that is always red teaches people to ignore it.
+      # These two groups are where clippy finds actual bugs, and they pass
+      # today — so this catches the next real one instead of drowning it.
+      - name: Clippy (correctness + suspicious)
+        run: cargo clippy --all-targets --release -- -D clippy::correctness -D clippy::suspicious
+
       - name: Unit tests (nitrogen gate + pooling)
         run: cargo test --lib --release -- --nocapture
 
@@ -43,3 +76,48 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - name: Unit tests on macOS
         run: cargo test --lib --release -- --nocapture
+
+  # Nothing else in CI launches the engine, so a GDScript parse error, a shader
+  # syntax error or a stale librama_sim reached a release unchallenged. The gate
+  # loads every script, shader and scene headless in about a second. It never
+  # boots main.tscn: world generation takes minutes and --selftest has been seen
+  # hanging indefinitely, so a gate that booted the game could not fail fast.
+  godot-load:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Build simulation core
+        working-directory: sim
+        run: cargo build --release --lib
+
+      # The gate asserts the GDExtension registers its classes, so the library
+      # has to be where rama_sim.gdextension expects it.
+      - name: Install native library
+        run: |
+          mkdir -p game/bin
+          cp sim/target/release/librama_sim.so game/bin/librama_sim.so
+          ls -la game/bin/
+
+      - uses: chickensoft-games/setup-godot@v2
+        with:
+          version: ${{ env.GODOT_VERSION }}
+          use-dotnet: false
+          # Export templates are only needed to build a game, not to load one.
+          include-templates: false
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # Gate the gate first. Both failure modes it guards against were real:
+      # load() returns a non-null object for a file that failed to compile, and
+      # a Shader is not compiled until something queries its uniforms. A gate
+      # that reports success on a broken tree is worse than no gate, and only
+      # the platform running it can prove otherwise.
+      - name: Verify the gate still has teeth
+        run: python3 tools/check_godot.py --verify
+
+      - name: Headless load gate
+        run: python3 tools/check_godot.py

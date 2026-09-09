@@ -86,8 +86,7 @@ pub fn chunk_mesh(t: &Terrain, ci: i64, cj: i64, workers: usize) -> mesher::Mesh
     // radial step plus the steepest lateral step bounds how far a neighbour
     // can be. Past that the shortcut cannot move a vertex — only the value
     // of rock that stays rock.
-    let t_fast = (Terrain::MAX_TUBE_CARVE + cell + d_surf + 1.0)
-        .max(Terrain::SOLID_DEPTH);
+    let t_fast = (Terrain::MAX_TUBE_CARVE + cell + d_surf + 1.0).max(Terrain::SOLID_DEPTH);
 
     // Ground band: air above the highest ground, cave depth below the lowest.
     let mut e_top = e_hi + 6.0;
@@ -149,8 +148,8 @@ pub fn chunk_mesh(t: &Terrain, ci: i64, cj: i64, workers: usize) -> mesher::Mesh
     let mut field = mesher::Field::new(n_lat, n_rad, n_lat);
     let air = Terrain::AIR_DEPTH;
     let stride = n_lat + 1; // one step in j
-    // One axial slice of the lattice — a contiguous run of the field buffer,
-    // and the unit of work when this is spread over threads.
+                            // One axial slice of the lattice — a contiguous run of the field buffer,
+                            // and the unit of work when this is spread over threads.
     let slice = |block: &mut [f32], k: usize| {
         let z = z_of(base_zj + k as i64);
         for i in 0..sxy {

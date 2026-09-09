@@ -9,6 +9,9 @@ use crate::weather::Weather;
 
 pub const MAX_PLANTS: usize = 50_000;
 
+/// A plant whose species has not been seated yet.
+pub const UNASSIGNED: u8 = 255;
+
 #[derive(Clone, Debug)]
 pub struct Plant {
     pub carbon: f32,
@@ -21,6 +24,11 @@ pub struct Plant {
     pub age: f32,
     pub stress: f32,
     pub genome_id: u32,
+    /// Species/form, resolved once when the organism establishes and never
+    /// recomputed. `UNASSIGNED` until `Biosphere::new` seats it. Querying a
+    /// species from live weather let a tree change kind as the climate drifted,
+    /// and made identity depend on when the camera last looked.
+    pub species: u8,
     pub theta: f32,
     pub z: f32,
     pub alive: bool,
@@ -39,6 +47,7 @@ impl Default for Plant {
             age: 80.0,
             stress: 0.0,
             genome_id: 0,
+            species: UNASSIGNED,
             theta: 0.0,
             z: 0.0,
             alive: true,

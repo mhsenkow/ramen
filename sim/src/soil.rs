@@ -248,7 +248,13 @@ impl Soil {
                 // Rain already carries province/orographic scale from weather.
                 m += rain[i] * dt * 1.15;
                 // Dry cells (little recent rain) evaporate faster — rain-shadow scrub.
-                let dry = if rain[i] < 0.04 { 1.45 } else if rain[i] < 0.12 { 1.15 } else { 0.92 };
+                let dry = if rain[i] < 0.04 {
+                    1.45
+                } else if rain[i] < 0.12 {
+                    1.15
+                } else {
+                    0.92
+                };
                 m = (m - evap_base * dry * (0.45 + 0.55 * m)).clamp(0.02, 1.0);
 
                 // Neighbours: theta wraps, z clamps.
@@ -271,8 +277,22 @@ impl Soil {
                         n_next[j] += w * leach_rate * self.n[i];
                     }
                 }
-                m_next[i] = (m - outflow).clamp(0.02, 1.0);
-                n_next[i] = (self.n[i] - n_out).max(0.0);
+                // Subtract, do not assign.
+                //
+                // `n_next` starts as a copy of `self.n` and uphill neighbours
+                // `+=` their leached nitrogen into it. Assigning here overwrote
+                // every deposit that had already landed this pass, so roughly
+                // half the leached nitrogen was destroyed outright — a hole in
+                // a ledger this file explicitly says must stay closed ("no
+                // upper clamp on N — clipping would destroy the ledger").
+                //
+                // Moisture had the same shape. It is not a conserved quantity,
+                // but discarding inflow still left downslope cells drier than
+                // the drainage says they are, so the local rain/evaporation
+                // delta is applied on top of whatever arrived instead.
+                let local = m - self.moisture[i];
+                m_next[i] = (m_next[i] + local - outflow).clamp(0.02, 1.0);
+                n_next[i] = (n_next[i] - n_out).max(0.0);
             }
         }
         self.moisture = m_next;

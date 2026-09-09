@@ -15,7 +15,7 @@ use std::collections::HashMap;
 /// Coarse spatial bucket so density() consults only nearby strokes, never all.
 const CELL: f32 = 24.0;
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub struct Stroke {
     pub c: [f32; 3],
     pub radius: f32,

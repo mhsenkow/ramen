@@ -16,11 +16,14 @@ mod dwelling;
 mod economy;
 mod edits;
 mod erosion;
+mod far_field;
 mod flow;
+mod forest;
 mod habitat;
 mod lakes;
 mod material;
 mod mesher;
+mod mp;
 mod noise;
 mod paint;
 mod persist;
@@ -29,6 +32,7 @@ mod province;
 mod soil;
 mod sph;
 mod terrain;
+mod tree_form;
 mod trophic;
 mod weather;
 mod woodscape;
@@ -36,96 +40,12 @@ mod woodscape;
 #[allow(unused_imports)]
 use habitat::Habitat;
 
+use biosphere::Biosphere;
 /// The global sample lattice every chunk shares. Tangential steps are chosen so
 /// arc length at the hull is ~= the radial/axial cell size.
 use chunker::{CHUNK_N, LATTICE_CELL, NT_LAT};
-use biosphere::Biosphere;
 use terrain::Terrain;
 use weather::Weather;
-
-/// Map biome + climate + genome → plant form id (0–7) for Multimesh archetypes.
-/// 0 conifer, 1 broadleaf, 2 willow, 3 scrub, 4 reed, 5 orchard, 6 acacia, 7 giant.
-fn forest_kind(
-    bid: u8,
-    weather: &Weather,
-    ter: &Terrain,
-    theta: f32,
-    z: f32,
-    genome: u32,
-) -> u8 {
-    let elev = ter.elevation(theta, z);
-    let arid = weather.aridity_at(theta, z);
-    let temp = weather.temp_at_elev(theta, z, elev);
-    let g = genome;
-    let form = (g % 8) as u8;
-    let prov = province::province_at(&ter.hab, theta, z);
-    if prov.weight(province::id::CITY) > 0.45 {
-        // Street trees / plaza orphans — scrub + rare orchard.
-        return if g % 5 == 0 { 5 } else { 3 };
-    }
-    if prov.weight(province::id::FARMLAND) > 0.45 {
-        return 5; // orchard / crop-edge trees
-    }
-    match bid {
-        biome::id::FOREST => {
-            if elev > ter.hab.max_elevation * 0.42 || temp < 9.0 {
-                0 // montane conifer
-            } else if arid > 0.48 {
-                if form % 3 == 0 {
-                    6
-                } else {
-                    3
-                } // dry acacia / scrub-forest edge
-            } else {
-                // Mesic stand: pine, oak, gallery, giant — genome picks the silhouette.
-                match form {
-                    0 | 1 => 0,
-                    2 | 3 => 1,
-                    4 => 6,
-                    5 => 7,
-                    6 => 0,
-                    _ => 1,
-                }
-            }
-        }
-        biome::id::SWAMP | biome::id::WETLAND | biome::id::RIPARIAN => {
-            if form % 5 == 0 {
-                4
-            } else if form % 3 == 0 {
-                1
-            } else {
-                2
-            }
-        }
-        biome::id::MEADOW => match form % 5 {
-            0 => 5,
-            1 => 6,
-            2 => 0,
-            _ => 1,
-        },
-        biome::id::SCRUB | biome::id::ALPINE | biome::id::BARE_ROCK | biome::id::DESERT
-        | biome::id::DUNE => {
-            if form == 7 {
-                6
-            } else {
-                3
-            }
-        }
-        biome::id::SHORE => 4,
-        biome::id::FARM => 5,
-        _ => {
-            if arid > 0.55 {
-                3
-            } else if form == 5 {
-                7
-            } else if form % 4 == 0 {
-                6
-            } else {
-                1
-            }
-        }
-    }
-}
 
 struct RamaSimExtension;
 
@@ -139,7 +59,7 @@ pub struct RamaTerrain {
     bio: Option<Biosphere>,
     /// Downstream pointers before last dig — for reroute metrics.
     prev_down: Vec<u32>,
-    /// Colonist pack — mass and volume both bind (item 820).
+    /// Colonist pack — mass and volume both bind (item 820). Actor 0.
     pack: economy::Inventory,
     /// Spoil heaps in the world (item 822).
     heaps: Vec<economy::Stockpile>,
@@ -148,6 +68,8 @@ pub struct RamaTerrain {
     /// Last known player pose for agent social behaviour.
     player_theta: f32,
     player_z: f32,
+    /// Live co-op: guest packs, poses, mutation queue, guest undo log.
+    mp: mp::MpState,
     /// Satiety after eating ramen (presentation + mood stub).
     satiety: f32,
     /// LANDSCAPE_3200 Wave 1.6 — mesh on a scoped worker thread when true.
@@ -174,6 +96,7 @@ impl IRefCounted for RamaTerrain {
             stations: Vec::new(),
             player_theta: 0.0,
             player_z: 0.0,
+            mp: mp::MpState::default(),
             satiety: 0.5,
             threaded_meshing: true,
             base,
@@ -184,6 +107,54 @@ impl IRefCounted for RamaTerrain {
 impl RamaTerrain {
     fn ter(&self) -> &Terrain {
         self.t.as_ref().expect("call generate() first")
+    }
+
+    fn pack_mut(&mut self, actor: mp::ActorId) -> &mut economy::Inventory {
+        if actor == chronicle::ACTOR_PLAYER {
+            &mut self.pack
+        } else {
+            self.mp.ensure_pack(actor);
+            self.mp.packs.get_mut(&actor).expect("pack just ensured")
+        }
+    }
+
+    fn pack_ref(&self, actor: mp::ActorId) -> &economy::Inventory {
+        if actor == chronicle::ACTOR_PLAYER {
+            &self.pack
+        } else {
+            self.mp.packs.get(&actor).unwrap_or(&self.pack)
+        }
+    }
+
+    fn actor_pose(&self, actor: mp::ActorId) -> (f32, f32) {
+        if actor == chronicle::ACTOR_PLAYER {
+            (self.player_theta, self.player_z)
+        } else {
+            self.mp
+                .poses
+                .get(&actor)
+                .copied()
+                .unwrap_or((self.player_theta, self.player_z))
+        }
+    }
+
+    fn push_stroke_event(&mut self, actor: mp::ActorId, stroke: edits::Stroke) {
+        let stroke_index = self.ter().edits.len().saturating_sub(1) as u32;
+        if actor != chronicle::ACTOR_PLAYER {
+            self.mp.guest_log.push((actor, stroke));
+        }
+        self.mp.push(mp::MutationEvent::Stroke {
+            actor,
+            stroke,
+            stroke_index,
+        });
+        let inv = self.pack_ref(actor).clone();
+        self.mp.push(mp::MutationEvent::Inventory { actor, inv });
+    }
+
+    fn emit_inventory(&mut self, actor: mp::ActorId) {
+        let inv = self.pack_ref(actor).clone();
+        self.mp.push(mp::MutationEvent::Inventory { actor, inv });
     }
 
     fn fallback_biome_id(t: &Terrain, theta: f32, z: f32) -> u8 {
@@ -221,7 +192,16 @@ impl RamaTerrain {
         let axial = 1.0 - ((z / h.length).abs() * 2.0).clamp(0.0, 1.0).powf(1.4);
         let temp = 8.0 + 18.0 * axial - e * 0.0065;
         let soil_depth = (2.6 + flux * 5.0) * (1.0 - slope * 0.7).max(0.1);
-        biome::classify_ex(moisture, temp, e, slope, flux, soil_depth, arid, h.water_level)
+        biome::classify_ex(
+            moisture,
+            temp,
+            e,
+            slope,
+            flux,
+            soil_depth,
+            arid,
+            h.water_level,
+        )
     }
 
     fn station_required(kind: &str) -> bool {
@@ -376,76 +356,16 @@ impl RamaTerrain {
         sector: i64,
         n_sectors: i64,
     ) -> Dictionary {
-        let t = self.ter();
-        let h = t.hab;
-        let (nt_full, nz) = (nt.max(8) as usize, nz.max(4) as usize);
         let n_sectors = n_sectors.max(1) as usize;
-        let sector = (sector.rem_euclid(n_sectors as i64)) as usize;
-        // Cells around the drum for this sector, plus one overlap on each side.
-        let per = (nt_full + n_sectors - 1) / n_sectors;
-        let t0 = sector * per;
-        // Always overlap one cell into the next sector. The last wedge wraps
-        // past nt_full so ti%nt_full meets sector 0 — without that the θ=0
-        // join cracks into a black saw-tooth on the horizon.
-        let t1 = if sector + 1 == n_sectors {
-            nt_full + 1
-        } else {
-            ((sector + 1) * per + 1).min(nt_full + 1)
-        };
-        let nt_sec = t1 - t0; // vertices in theta (includes overlap)
-        if nt_sec < 2 {
-            return self.pack(mesher::Mesh::empty());
-        }
-
-        let mut m = mesher::Mesh::empty();
-        // Mild 5-tap blur on far radius so silhouettes don't stairstep into
-        // black saw-teeth, while still tracking ridges.
-        let blur = |th: f32, z: f32| -> f32 {
-            let e = 1.6f32;
-            let a = t.surface_radius(th, z);
-            let b = t.surface_radius(th + e / h.radius, z);
-            let c = t.surface_radius(th - e / h.radius, z);
-            let d = t.surface_radius(th, z + e);
-            let f = t.surface_radius(th, z - e);
-            (a * 0.40 + (b + c + d + f) * 0.15) + r_offset as f32
-        };
-        for zi in 0..=nz {
-            let z = (zi as f32 / nz as f32 - 0.5) * h.length;
-            for ti in t0..t1 {
-                let th = (ti % nt_full) as f32 / nt_full as f32 * std::f32::consts::TAU;
-                let r = blur(th, z);
-                let p = h.to_world(th, z, r);
-                m.verts.push(p);
-                // No AO on the far field. Four extra bilinear samples per vertex
-                // cost ~200 ms across a million vertices, and at 1.8 km under
-                // 98 % haze it is invisible. AO stays where it reads: near chunks.
-                m.ao.push(1.0);
-                let e = 1.2f32;
-                let dt = (blur(th + e / h.radius, z) - blur(th - e / h.radius, z)) / (2.0 * e);
-                let dz = (blur(th, z + e) - blur(th, z - e)) / (2.0 * e);
-                let up = h.up_at(p);
-                let tang = [-th.sin(), th.cos(), 0.0];
-                let axial = [0.0, 0.0, 1.0];
-                let mut n = [0.0f32; 3];
-                for i in 0..3 {
-                    n[i] = up[i] + tang[i] * dt + axial[i] * dz;
-                }
-                let mag = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt().max(1e-6);
-                m.normals.push([n[0] / mag, n[1] / mag, n[2] / mag]);
-            }
-        }
-        let vid = |ti: usize, zi: usize| (zi * nt_sec + ti) as i32;
-        for zi in 0..nz {
-            for ti in 0..nt_sec - 1 {
-                let (a, b) = (vid(ti, zi), vid(ti + 1, zi));
-                let (c, d2) = (vid(ti + 1, zi + 1), vid(ti, zi + 1));
-                // Godot front faces are clockwise (ArrayMesh). CCW winding
-                // made cull_back discard every triangle facing the camera —
-                // the "far voids" were empty clear colour, not fog/haze.
-                m.indices.extend_from_slice(&[a, b, c, a, c, d2]);
-            }
-        }
-        self.pack(m)
+        let sector = sector.rem_euclid(n_sectors as i64) as usize;
+        self.pack(far_field::far_mesh_sector(
+            self.ter(),
+            nt.max(8) as usize,
+            nz.max(4) as usize,
+            r_offset as f32,
+            sector,
+            n_sectors,
+        ))
     }
 
     /// The drum's endcaps. Without these you can see straight out of the open
@@ -453,39 +373,7 @@ impl RamaTerrain {
     /// hundreds of metres axially before it reaches the far side.
     #[func]
     fn endcap_mesh(&self, nt: i64) -> Dictionary {
-        let t = self.ter();
-        let h = t.hab;
-        let nt = nt as usize;
-        let mut m = mesher::Mesh::empty();
-        for end in [-1.0f32, 1.0f32] {
-            // Pull the cap 2 m inside the drum. Sitting exactly on the far
-            // mesh's last row makes the two coplanar, and the irregular pale
-            // patches on the cap were z-fighting between them.
-            let z = end * (h.length * 0.5 - 2.0);
-            let base = m.verts.len() as i32;
-            m.verts.push([0.0, 0.0, z]);
-            m.ao.push(1.0);
-            m.normals.push([0.0, 0.0, -end]);
-            for ti in 0..nt {
-                let th = ti as f32 / nt as f32 * std::f32::consts::TAU;
-                let r = t.surface_radius(th, z) + 1.2;
-                m.verts.push(h.to_world(th, z, r));
-                m.ao.push(1.0);
-                m.normals.push([0.0, 0.0, -end]);
-            }
-            for ti in 0..nt {
-                let a = base;
-                let b = base + 1 + ti as i32;
-                let c = base + 1 + ((ti + 1) % nt) as i32;
-                // Clockwise when viewed from inside the drum.
-                if end > 0.0 {
-                    m.indices.extend_from_slice(&[a, c, b]);
-                } else {
-                    m.indices.extend_from_slice(&[a, b, c]);
-                }
-            }
-        }
-        self.pack(m)
+        self.pack(far_field::endcap_mesh(self.ter(), nt.max(8) as usize))
     }
 
     // ---------------------------------------------------------- mining --
@@ -510,6 +398,50 @@ impl RamaTerrain {
                 let _ = d.insert("hit", false);
             }
         }
+        if let Some(bio) = self.bio.as_ref() {
+            let terrain_dist = d
+                .get("distance")
+                .map(|v| v.to::<f64>() as f32)
+                .unwrap_or(max as f32);
+            if let Some((hit, normal, material)) = bio.woodscape.raycast(
+                [origin.x, origin.y, origin.z],
+                [n.x, n.y, n.z],
+                terrain_dist,
+            ) {
+                let point = Vector3::new(hit[0], hit[1], hit[2]);
+                let normal = Vector3::new(normal[0], normal[1], normal[2]);
+                let _ = d.insert("hit", true);
+                let _ = d.insert("point", point + n * 0.002);
+                let _ = d.insert("normal", normal);
+                let _ = d.insert("air", point + normal * 0.04);
+                let _ = d.insert("distance", point.distance_to(origin) as f64);
+                let _ = d.insert(
+                    "kind",
+                    if material == woodscape::kind::WOOD {
+                        "timber"
+                    } else {
+                        "leaf"
+                    },
+                );
+                let _ = d.insert("vegetation", true);
+                // What fraction of the brush will actually come away here, and
+                // where the bite is centred. The marker used to draw the full
+                // brush sphere sitting on the face the ray struck, which was
+                // wrong twice over: wood takes a fraction of the brush, and
+                // the bite is centred in the block rather than on its skin.
+                let _ = d.insert(
+                    "bite_scale",
+                    woodscape::Woodscape::bite_scale(material) as f64,
+                );
+                if let Some((key, _)) = bio
+                    .woodscape
+                    .nearest_cell([point.x, point.y, point.z], 0.48)
+                {
+                    let c = woodscape::dequantize(key);
+                    let _ = d.insert("bite_at", Vector3::new(c[0], c[1], c[2]));
+                }
+            }
+        }
         d
     }
 
@@ -517,7 +449,7 @@ impl RamaTerrain {
     /// Accepted mass is auto-added to the colonist pack when `auto_take` is true.
     #[func]
     fn dig(&mut self, p: Vector3, radius: f64, snap: f64, level: bool) -> Dictionary {
-        self.dig_ex(p, radius, snap, level, true)
+        self.dig_as(chronicle::ACTOR_PLAYER as i64, p, radius, snap, level, true)
     }
 
     #[func]
@@ -529,8 +461,49 @@ impl RamaTerrain {
         level: bool,
         auto_take: bool,
     ) -> Dictionary {
+        self.dig_as(
+            chronicle::ACTOR_PLAYER as i64,
+            p,
+            radius,
+            snap,
+            level,
+            auto_take,
+        )
+    }
+
+    /// Dig credited to `actor_id` (0 = host player, 1000+peer = guests).
+    #[func]
+    fn dig_as(
+        &mut self,
+        actor_id: i64,
+        p: Vector3,
+        radius: f64,
+        snap: f64,
+        level: bool,
+        auto_take: bool,
+    ) -> Dictionary {
+        let actor = actor_id.max(0) as mp::ActorId;
+        self.mp.ensure_pack(actor);
         let mut d = Dictionary::new();
-        let y = {
+        // A ray hit lands on a block face, so quantizing it names the empty
+        // cell outside that face. Probing a single axis missed four faces out
+        // of six, and the dig then fell through to the terrain — which returns
+        // nothing in mid-air, so aiming at a trunk simply did nothing.
+        // `nearest_cell` is orientation-independent. One cell diagonal of
+        // tolerance (0.55 m * sqrt(3) / 2) accepts a face hit and nothing else,
+        // so digging soil beside a tree still digs soil.
+        const VEG_REACH: f32 = 0.48;
+        // One query, not two: this both decides whether the swing is against
+        // vegetation and names the cell the bite gets centred on.
+        let struck = self
+            .bio
+            .as_ref()
+            .and_then(|b| b.woodscape.nearest_cell([p.x, p.y, p.z], VEG_REACH))
+            .map(|(key, cell)| (woodscape::dequantize(key), cell.kind));
+        let vegetation = struck.is_some();
+        let y = if vegetation {
+            economy::DigYield::default()
+        } else {
             let Some(t) = self.t.as_mut() else {
                 let _ = d.insert("ok", false);
                 return d;
@@ -543,19 +516,118 @@ impl RamaTerrain {
                 }
             }
         };
+        // Ice is the one stratum that does not survive being lifted out of
+        // the ground. See `economy::ice_melt_fraction`.
+        let mut melt_kg = 0.0f32;
         // Trees are landscape solids with their own material: excavating a
         // trunk mines timber the same way digging rock mines strata.
         let (theta, z, _) = self.ter().hab.to_cyl([p.x, p.y, p.z]);
-        // Whole stands first. Felling clears that plant's voxels, so the block
-        // sweep below can only ever bill for wood the felling did not already
-        // pay out — otherwise one bite at a trunk yielded the tree twice.
-        let (mut timber, trees) = self.mine_trees_at(theta, z, radius as f32 * 1.35);
+        let mut y = y;
+        if let (Some(bio), Some(ter)) = (self.bio.as_mut(), self.t.as_ref()) {
+            let ice: f32 = y
+                .parts
+                .iter()
+                .filter(|q| q.material_id == material::id::ICE)
+                .map(|q| q.mass_kg)
+                .sum();
+            if ice > 0.0 {
+                let temp = bio.weather.temp_at_elev(theta, z, ter.elevation(theta, z));
+                let f = economy::ice_melt_fraction(temp);
+                if f > 0.0 {
+                    melt_kg = ice * f;
+                    // What melted is no longer in the pile you are lifting.
+                    for q in y.parts.iter_mut() {
+                        if q.material_id == material::id::ICE {
+                            q.mass_kg *= 1.0 - f;
+                            q.volume_m3 *= 1.0 - f;
+                            q.loose_m3 *= 1.0 - f;
+                        }
+                    }
+                    y.retotal();
+                    // Buried ice is stored water, so melting it is a deposit
+                    // into the habitat's ledger, not an invention.
+                    bio.water_stock += melt_kg;
+                    bio.pond_at(ter, theta, z, melt_kg / 1000.0);
+                }
+            }
+        }
+        // Excavation removes only intersected material. H remains an explicit
+        // whole-plant action; pointing at a branch must not delete its tree.
+        let mut timber = economy::DigYield::default();
+        let trees = 0u32;
         let mut voxel_blocks = 0u32;
+        // Material that came down because the cut left it unsupported. Kept
+        // apart from the bite: this is not something the swing collected, it
+        // is a pile that appeared at the foot of the tree.
+        let mut felled_blocks = 0u32;
+        let mut felled_kg = 0.0f32;
+        // Copied out because the collapse needs the habitat's geometry while
+        // holding the biosphere mutably. `Habitat` is a handful of scalars.
+        let hab = self.ter().hab;
         if let Some(bio) = self.bio.as_mut() {
-            let (wkg, lkg, n) = bio
-                .woodscape
-                .harvest_sphere([p.x, p.y, p.z], radius as f32 * 1.15);
+            // The brush is the axe head: a swing takes a chunk the size of the
+            // sphere, not one block. It used to take exactly one, which read as
+            // pecking at a tree with a chisel however big the brush was set —
+            // the size control implied a tool and then did nothing.
+            //
+            // Two things make that land as a swing rather than a scoop. The
+            // bite is centred on the cell actually struck rather than on the
+            // ray's hit point, which sits on a block *face* and would leave
+            // half the sphere in open air. And its radius is scaled by what
+            // was struck, so foliage gives way and trunk wood does not.
+            let (wkg, lkg, n) = if let Some((at, material)) = struck {
+                let r = radius as f32 * woodscape::Woodscape::bite_scale(material);
+                let got = bio.woodscape.harvest_sphere(at, r);
+                // A swing that connects has to take something. At the smallest
+                // brush a wood bite is a sub-cell sphere on purpose, so that
+                // precise carving stays possible — but then the sphere can
+                // miss the very cell that was aimed at.
+                if got.2 == 0 {
+                    match bio.woodscape.harvest_one(at, VEG_REACH) {
+                        Some((woodscape::kind::WOOD, kg)) => (kg, 0.0, 1),
+                        Some((_, kg)) => (0.0, kg, 1),
+                        None => (0.0, 0.0, 0),
+                    }
+                } else {
+                    got
+                }
+            } else {
+                bio.woodscape
+                    .harvest_sphere([p.x, p.y, p.z], radius as f32 * 1.15)
+            };
             voxel_blocks = n;
+            // Anything the cut left unsupported comes down now. It lands as a
+            // pile at the foot of the tree rather than in the pack: a crown
+            // that fell is on the ground, and it can be tonnes of timber.
+            for pid in bio.woodscape.cut_plants() {
+                let up = hab.up_at([p.x, p.y, p.z]);
+                let Some(f) = bio.woodscape.collapse_severed(pid, up) else {
+                    continue;
+                };
+                let (fth, fz, _) = hab.to_cyl(f.at);
+                felled_blocks += f.blocks;
+                for (id, kg, grade) in [
+                    (economy::bio_id::WOOD, f.wood_kg, 0.7f32),
+                    (economy::bio_id::GREEN, f.leaf_kg, 0.5f32),
+                ] {
+                    if kg <= 0.05 {
+                        continue;
+                    }
+                    let ph = economy::bio_phys(id);
+                    let vol = kg / ph.bulk_kg_m3.max(1.0);
+                    economy::deposit_heap(
+                        &mut self.heaps,
+                        hab.radius,
+                        fth,
+                        fz,
+                        id,
+                        kg,
+                        vol * ph.bulking,
+                        grade,
+                    );
+                    felled_kg += kg;
+                }
+            }
             for (id, kg, grade) in [
                 (economy::bio_id::WOOD, wkg, 0.7f32),
                 (economy::bio_id::GREEN, lkg, 0.5f32),
@@ -582,7 +654,7 @@ impl RamaTerrain {
         if auto_take {
             let hab_r = self.ter().hab.radius;
             if timber.total_mass_kg > 1e-4 {
-                timber_accepted = self.pack.try_add(&timber);
+                timber_accepted = self.pack_mut(actor).try_add(&timber);
                 if timber_accepted < 0.999 {
                     let spill = (1.0 - timber_accepted).max(0.0);
                     for part in &timber.parts {
@@ -597,9 +669,10 @@ impl RamaTerrain {
                             part.grade,
                         );
                     }
+                    self.mp.push(mp::MutationEvent::HeapTouch);
                 }
             }
-            let dirt_acc = self.pack.try_add(&y);
+            let dirt_acc = self.pack_mut(actor).try_add(&y);
             if dirt_acc < 0.999 {
                 let spill = (1.0 - dirt_acc).max(0.0);
                 for part in &y.parts {
@@ -614,6 +687,7 @@ impl RamaTerrain {
                         part.grade,
                     );
                 }
+                self.mp.push(mp::MutationEvent::HeapTouch);
             }
             // Combined acceptance for HUD (timber-weighted if we felled).
             if trees > 0 {
@@ -632,14 +706,35 @@ impl RamaTerrain {
             .sum::<f32>();
         let timber_kept = timber_kg * timber_accepted;
         let _ = d.insert("ok", true);
+        let _ = d.insert("actor", actor as i64);
         let _ = d.insert("mass_kg", combined.total_mass_kg as f64);
         let _ = d.insert("loose_m3", combined.total_loose_m3 as f64);
         let _ = d.insert("volume_m3", combined.total_volume_m3 as f64);
         let _ = d.insert("accepted", accepted as f64);
         let _ = d.insert("trees", trees as i64);
+        let _ = d.insert("blocks", voxel_blocks as i64);
+        let _ = d.insert("vegetation", vegetation);
+        let _ = d.insert("meltwater_l", (melt_kg) as f64);
+        let _ = d.insert("felled_blocks", felled_blocks as i64);
+        let _ = d.insert("felled_kg", felled_kg as f64);
         let _ = d.insert("timber_kg", timber_kg as f64);
         let _ = d.insert("timber_kept", timber_kept as f64);
         let _ = d.insert("parts", Self::yield_to_array(&combined));
+        if !vegetation {
+            if let Some(s) = self.ter().edits.strokes_slice().last().copied() {
+                self.push_stroke_event(actor, s);
+            }
+        } else if voxel_blocks > 0 {
+            self.mp.push(mp::MutationEvent::WoodscapeOp {
+                actor,
+                x: p.x,
+                y: p.y,
+                z: p.z,
+                as_leaf: false,
+                place: false,
+            });
+            self.emit_inventory(actor);
+        }
         if combined.total_volume_m3 > 0.05 || trees > 0 {
             let hab_r = self.ter().hab.radius;
             if let Some(bio) = self.bio.as_mut() {
@@ -649,13 +744,17 @@ impl RamaTerrain {
                 } else {
                     chronicle::EventKind::Dig
                 };
-                let note = if trees > 0 { "you felled timber" } else { "you dug" };
+                let note = if trees > 0 {
+                    "you harvested material"
+                } else {
+                    "you dug"
+                };
                 bio.chronicle.record(
                     day,
                     theta,
                     z,
                     kind,
-                    chronicle::ACTOR_PLAYER,
+                    actor,
                     if trees > 0 {
                         timber.total_mass_kg
                     } else {
@@ -719,12 +818,20 @@ impl RamaTerrain {
         hit.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
         const MAX_PER_BITE: usize = 2;
         for &(_, i) in hit.iter().take(MAX_PER_BITE) {
-            let mut y = economy::harvest_plant(&bio.plants.plants[i]);
+            let pid = i as u32;
+            // One ledger for every removal path. Chopping the trunk into blocks
+            // has already paid out that material, so felling the remains pays
+            // only the remainder — and then records the whole organism as taken
+            // so nothing can bill it a third time.
+            let taken = bio.woodscape.taken_kg(pid);
+            let mut y = economy::harvest_plant_remaining(&bio.plants.plants[i], taken);
+            let above = economy::plant_above_ground_kg(&bio.plants.plants[i]);
+            bio.woodscape.add_taken(pid, (above - taken).max(0.0));
             bio.plants.plants[i].alive = false;
             // The stand's blocks go with it. Leaving them stamped left a whole
             // canopy floating over the stump, and the wood in it would have
             // been billed a second time by the next dig bite through the gap.
-            bio.woodscape.remove_plant(i as u32);
+            bio.woodscape.remove_plant(pid);
             let npp = bio.trophic.npp_at(theta, z, hab_len);
             let grade = (npp / 1800.0).clamp(0.15, 1.0);
             for part in &mut y.parts {
@@ -736,6 +843,10 @@ impl RamaTerrain {
         (out, n)
     }
 
+    /// The organism's species. Falls back to resolving the site only for a
+    /// record that predates seating (`plant::UNASSIGNED`), which cannot happen
+    /// for a world generated by `Biosphere::new`; keeping the branch means an
+    /// older in-memory record degrades to the old behaviour instead of a panic.
     fn yield_to_array(y: &economy::DigYield) -> VariantArray {
         let mut arr = VariantArray::new();
         for part in &y.parts {
@@ -753,31 +864,25 @@ impl RamaTerrain {
 
     #[func]
     fn inventory(&self) -> Dictionary {
-        let mut d = Dictionary::new();
-        let _ = d.insert("mass_kg", self.pack.mass_kg() as f64);
-        let _ = d.insert("loose_m3", self.pack.volume_m3() as f64);
-        let _ = d.insert("max_mass_kg", self.pack.max_mass_kg as f64);
-        let _ = d.insert("max_volume_m3", self.pack.max_volume_m3 as f64);
-        let _ = d.insert("mass_frac", self.pack.mass_frac() as f64);
-        let _ = d.insert("volume_frac", self.pack.volume_frac() as f64);
+        self.inventory_for(chronicle::ACTOR_PLAYER as i64)
+    }
+
+    #[func]
+    fn inventory_for(&self, actor_id: i64) -> Dictionary {
+        let actor = actor_id.max(0) as mp::ActorId;
         let g = self
             .t
             .as_ref()
             .map(|t| t.hab.surface_gravity())
             .unwrap_or(9.81);
-        let _ = d.insert("encumbrance", self.pack.encumbrance(g) as f64);
-        let mut stacks = VariantArray::new();
-        for s in &self.pack.stacks {
-            let mut sd = Dictionary::new();
-            let _ = sd.insert("material_id", s.material_id as i64);
-            let _ = sd.insert("name", economy::bio_name(s.material_id));
-            let _ = sd.insert("mass_kg", s.mass_kg as f64);
-            let _ = sd.insert("loose_m3", s.loose_m3 as f64);
-            let _ = sd.insert("grade", s.grade as f64);
-            let _ = stacks.push(&sd.to_variant());
-        }
-        let _ = d.insert("stacks", stacks);
-        d
+        let inv = if actor == chronicle::ACTOR_PLAYER {
+            &self.pack
+        } else if let Some(p) = self.mp.packs.get(&actor) {
+            p
+        } else {
+            return mp::MpState::inventory_dict(&economy::Inventory::default(), g);
+        };
+        mp::MpState::inventory_dict(inv, g)
     }
 
     /// Pick the nearest heap back up. The inverse of drop_inventory, and the
@@ -917,7 +1022,7 @@ impl RamaTerrain {
                     chronicle::EventKind::Harvest,
                     chronicle::ACTOR_PLAYER,
                     y.total_mass_kg,
-                    "you felled timber",
+                    "you harvested material",
                 );
                 Self::record_plot_helps(
                     bio,
@@ -987,6 +1092,19 @@ impl RamaTerrain {
             let _ = inputs.push(&row.to_variant());
         }
         let _ = d.insert("inputs", inputs);
+        // Outputs by name, not just `mass_out`. A recipe list that cannot say
+        // what a recipe makes is a list of verbs with no objects.
+        let mut outputs = VariantArray::new();
+        for io in r.outputs {
+            if io.material == "gas_loss" {
+                continue; // Mass into the atmosphere, not a stack you receive.
+            }
+            let mut row = Dictionary::new();
+            let _ = row.insert("material", io.material);
+            let _ = row.insert("mass_kg", io.mass_kg as f64);
+            let _ = outputs.push(&row.to_variant());
+        }
+        let _ = d.insert("outputs", outputs);
         d
     }
 
@@ -1189,8 +1307,25 @@ impl RamaTerrain {
 
     #[func]
     fn fill(&mut self, p: Vector3, radius: f64, snap: f64, level: bool) {
+        self.fill_as(chronicle::ACTOR_PLAYER as i64, p, radius, snap, level);
+    }
+
+    #[func]
+    fn fill_as(&mut self, actor_id: i64, p: Vector3, radius: f64, snap: f64, level: bool) {
+        let actor = actor_id.max(0) as mp::ActorId;
         if let Some(t) = self.t.as_mut() {
             t.fill([p.x, p.y, p.z], radius as f32, snap as f32, level);
+            if let Some(s) = t.edits.strokes_slice().last().copied() {
+                if actor != chronicle::ACTOR_PLAYER {
+                    self.mp.guest_log.push((actor, s));
+                }
+                let stroke_index = t.edits.len().saturating_sub(1) as u32;
+                self.mp.push(mp::MutationEvent::Stroke {
+                    actor,
+                    stroke: s,
+                    stroke_index,
+                });
+            }
         }
     }
 
@@ -1310,6 +1445,7 @@ impl RamaTerrain {
         let _ = d.insert("kills", r.kills as i64);
         let _ = d.insert("mean_fear", r.mean_fear as f64);
         let _ = d.insert("route_sig", (r.route_sig & 0x7FFF_FFFF_FFFF_FFFF) as i64);
+        let _ = d.insert("water_rebuilt", r.water_rebuilt);
         let water_stock = self.bio.as_ref().map(|b| b.water_stock).unwrap_or(0.0);
         let _ = d.insert("water_stock", water_stock as f64);
         d
@@ -1338,8 +1474,202 @@ impl RamaTerrain {
 
     #[func]
     fn set_player_pos(&mut self, theta: f64, z: f64) {
+        self.set_actor_pos(chronicle::ACTOR_PLAYER as i64, theta, z);
+    }
+
+    #[func]
+    fn set_actor_pos(&mut self, actor_id: i64, theta: f64, z: f64) {
+        let actor = actor_id.max(0) as mp::ActorId;
+        let th = theta as f32;
+        let zz = z as f32;
+        if actor == chronicle::ACTOR_PLAYER {
+            self.player_theta = th;
+            self.player_z = zz;
+        } else {
+            self.mp.set_pose(actor, th, zz);
+        }
+    }
+
+    #[func]
+    fn clear_actor(&mut self, actor_id: i64) {
+        let actor = actor_id.max(0) as mp::ActorId;
+        self.mp.clear_actor(actor);
+    }
+
+    #[func]
+    fn schema_version(&self) -> i64 {
+        mp::SCHEMA_VERSION as i64
+    }
+
+    #[func]
+    fn net_actor_id(&self, peer_id: i64) -> i64 {
+        mp::net_actor(peer_id.max(0) as u32) as i64
+    }
+
+    /// Drain pending mutation events for multiplayer replication.
+    #[func]
+    fn take_mutation_events(&mut self) -> VariantArray {
+        self.mp.drain_dicts()
+    }
+
+    /// Apply a stroke without yield (guest remesh / echo path).
+    #[func]
+    fn append_stroke(
+        &mut self,
+        cx: f64,
+        cy: f64,
+        cz: f64,
+        radius: f64,
+        dig: bool,
+        level: bool,
+        ux: f64,
+        uy: f64,
+        uz: f64,
+    ) -> bool {
+        let Some(ter) = self.t.as_mut() else {
+            return false;
+        };
+        let c = [cx as f32, cy as f32, cz as f32];
+        let up = [ux as f32, uy as f32, uz as f32];
+        let r = radius as f32;
+        ter.edits.add(c, r, dig, level, up);
+        ter.apply_elev_stroke(c, r, dig, level, up);
+        ter.mark_flow_dirty_public(c, r);
+        true
+    }
+
+    /// Undo the tip stroke if it was a guest action (host review).
+    #[func]
+    fn undo_last_guest(&mut self) -> Dictionary {
+        let mut d = Dictionary::new();
+        let Some((actor, _stroke)) = self.mp.guest_log.pop() else {
+            let _ = d.insert("ok", false);
+            return d;
+        };
+        let tip_actor_ok = self
+            .t
+            .as_ref()
+            .and_then(|t| t.edits.strokes_slice().last())
+            .is_some();
+        if !tip_actor_ok {
+            let _ = d.insert("ok", false);
+            return d;
+        }
+        let popped = self.t.as_mut().and_then(|t| t.undo_dig());
+        match popped {
+            Some(s) => {
+                let _ = d.insert("ok", true);
+                let _ = d.insert("actor", actor as i64);
+                let _ = d.insert("point", Vector3::new(s.c[0], s.c[1], s.c[2]));
+                let _ = d.insert(
+                    "radius",
+                    (s.radius * if s.level { 1.7 } else { 1.0 }) as f64,
+                );
+            }
+            None => {
+                let _ = d.insert("ok", false);
+            }
+        }
+        d
+    }
+
+    #[func]
+    fn guest_undo_count(&self) -> i64 {
+        self.mp.guest_log.len() as i64
+    }
+
+    #[func]
+    fn harvest_near_as(&mut self, actor_id: i64, theta: f64, z: f64, radius: f64) -> Dictionary {
+        let actor = actor_id.max(0) as mp::ActorId;
+        self.mp.ensure_pack(actor);
+        let mut d = Dictionary::new();
+        let (y, n) = self.mine_trees_at(theta as f32, z as f32, radius as f32);
+        if n == 0 {
+            let _ = d.insert("ok", false);
+            return d;
+        }
+        let accepted = self.pack_mut(actor).try_add(&y);
+        let grade = y.parts.first().map(|p| p.grade).unwrap_or(0.0);
+        let timber_kg = y
+            .parts
+            .iter()
+            .filter(|p| p.material_id == economy::bio_id::WOOD)
+            .map(|p| p.mass_kg)
+            .sum::<f32>();
+        if y.total_mass_kg > 0.05 {
+            let hab_r = self.ter().hab.radius;
+            if let Some(bio) = self.bio.as_mut() {
+                let day = bio.day;
+                bio.chronicle.record(
+                    day,
+                    theta as f32,
+                    z as f32,
+                    chronicle::EventKind::Harvest,
+                    actor,
+                    y.total_mass_kg,
+                    "you harvested material",
+                );
+                Self::record_plot_helps(
+                    bio,
+                    day,
+                    theta as f32,
+                    z as f32,
+                    hab_r,
+                    y.total_mass_kg * 0.4,
+                    "you harvested on their plot",
+                );
+            }
+        }
+        self.emit_inventory(actor);
+        let _ = d.insert("ok", true);
+        let _ = d.insert("actor", actor as i64);
+        let _ = d.insert("mass_kg", y.total_mass_kg as f64);
+        let _ = d.insert("accepted", accepted as f64);
+        let _ = d.insert("grade", grade as f64);
+        let _ = d.insert("trees", n as i64);
+        let _ = d.insert("timber_kg", timber_kg as f64);
+        let _ = d.insert("parts", Self::yield_to_array(&y));
+        d
+    }
+
+    #[func]
+    fn craft_as(
+        &mut self,
+        actor_id: i64,
+        index: i64,
+        scale: f64,
+        theta: f64,
+        z: f64,
+    ) -> Dictionary {
+        // Reuse craft() path but swap pack temporarily via actor craft below.
+        let actor = actor_id.max(0) as mp::ActorId;
+        self.mp.ensure_pack(actor);
+        let (saved_th, saved_z) = (self.player_theta, self.player_z);
         self.player_theta = theta as f32;
         self.player_z = z as f32;
+        // Swap packs if guest.
+        let mut guest_pack = if actor != chronicle::ACTOR_PLAYER {
+            self.mp.packs.remove(&actor)
+        } else {
+            None
+        };
+        if let Some(ref mut gp) = guest_pack {
+            std::mem::swap(&mut self.pack, gp);
+        }
+        let d = self.craft(index, scale, theta, z);
+        if let Some(ref mut gp) = guest_pack {
+            std::mem::swap(&mut self.pack, gp);
+            self.mp.packs.insert(actor, gp.clone());
+        }
+        self.player_theta = saved_th;
+        self.player_z = saved_z;
+        self.emit_inventory(actor);
+        d
+    }
+
+    #[func]
+    fn surface_radius(&self, theta: f64, z: f64) -> f64 {
+        self.ter().surface_radius(theta as f32, z as f32) as f64
     }
 
     /// Spectacle clock → weather light schedule + carriage z (Photothermal Spine).
@@ -1832,7 +2162,13 @@ impl RamaTerrain {
 
     /// Catchment of the aim cell: subsampled [theta, z, ...] points (NEXT #8).
     #[func]
-    fn catchment_points(&self, theta: f64, z: f64, limit: i64) -> PackedFloat32Array {
+    fn catchment_points(&mut self, theta: f64, z: f64, limit: i64) -> PackedFloat32Array {
+        // The upstream index is not maintained by local dig repairs — it costs
+        // 5.6 ms and this overlay is the only thing that reads it. Pay for it
+        // here, where the query is already debounced behind a cooldown.
+        if let Some(t) = self.t.as_mut() {
+            t.flow.refresh_upstream();
+        }
         let t = self.ter();
         let th = theta as f32;
         let zz = z as f32;
@@ -2111,10 +2447,21 @@ impl RamaTerrain {
         let r_far = 480.0f32;
         let mut counts = [0usize; 3];
         let caps = [550usize, 700usize, 400usize];
-        for p in &bio.plants.plants {
-            if !p.alive {
-                continue;
-            }
+        let mut candidates: Vec<_> = bio
+            .plants
+            .plants
+            .iter()
+            .enumerate()
+            .filter(|(_, p)| p.alive)
+            .map(|(id, p)| {
+                let arc = (p.theta - th).rem_euclid(std::f32::consts::TAU);
+                let arc = arc.min(std::f32::consts::TAU - arc) * self.ter().hab.radius;
+                (arc * arc + (p.z - zz).powi(2), id, p)
+            })
+            .filter(|(d, _, _)| *d <= r_far * r_far)
+            .collect();
+        candidates.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)));
+        for (_, pid, p) in candidates {
             let dth = (p.theta - th).rem_euclid(std::f32::consts::TAU);
             let dth = dth.min(std::f32::consts::TAU - dth) * self.ter().hab.radius;
             let dz = (p.z - zz).abs();
@@ -2134,7 +2481,9 @@ impl RamaTerrain {
             let bid = bio.biome_at(self.ter(), p.theta, p.z);
             // Forest kinds from climate: elev+aridity → conifer / broadleaf / willow /
             // scrub (Wave 5). Genome still jitters within kind.
-            let kind = forest_kind(bid, &bio.weather, self.ter(), p.theta, p.z, p.genome_id);
+            // Stored identity, not a fresh query: representation must never
+            // choose a species (forest plan, design rule 6).
+            let kind = tree_form::species_of(p, bid, &bio.weather, self.ter());
             out.extend_from_slice(&[
                 p.theta,
                 p.z,
@@ -2144,19 +2493,26 @@ impl RamaTerrain {
                 lod as f32,
                 bid as f32,
                 kind as f32,
+                if bio.woodscape.is_edited(pid as u32) {
+                    2.0
+                } else if bio.woodscape.is_sprouted(pid as u32) {
+                    1.0
+                } else {
+                    0.0
+                },
             ]);
             counts[lod] += 1;
-            if out.len() / 8 >= lim {
+            if out.len() / 9 >= lim {
                 break;
             }
         }
         PackedFloat32Array::from(out.as_slice())
     }
 
-    /// Connected wood/leaf blocks near the camera. Streams stands in and out:
-    /// sprouts what came into range, unloads what fell well behind, then dumps
-    /// the near set as flat [x, y, z, kind, up01, ...] — kind 1 wood, 2 leaf,
-    /// up01 the cell's height up its own crown (the renderer shades by it).
+    /// Connected wood/leaf blocks near the camera. Streams stands in and out,
+    /// then dumps the near set as flat [x, y, z, kind, up01, ...] — kind 1
+    /// wood, 2 leaf, up01 the cell's height up its own crown (the renderer
+    /// shades by it).
     #[func]
     fn woodscape_lod(
         &mut self,
@@ -2169,56 +2525,78 @@ impl RamaTerrain {
         let center = [x as f32, y as f32, z as f32];
         let rad = (radius as f32).max(8.0);
         let lim = limit.max(1) as usize;
-        // Snapshot which stands to stamp under an immutable borrow — the biome
-        // lookup needs the whole biosphere, the stamping needs it mutable.
-        // Bounded per call so arriving at a dense grove costs several frames of
-        // stamping rather than one visible hitch.
-        let to_sprout: Vec<(usize, plant::Plant, u8)> = {
-            let (Some(bio), Some(ter)) = (self.bio.as_ref(), self.t.as_ref()) else {
-                return PackedFloat32Array::from([].as_slice());
-            };
-            if bio.woodscape.is_full() {
-                Vec::new()
-            } else {
-                let r2 = rad * rad;
-                let hab_r = ter.hab.radius;
-                let (cth, cz, _) = ter.hab.to_cyl(center);
-                bio.plants
-                    .plants
-                    .iter()
-                    .enumerate()
-                    .filter(|(i, p)| p.alive && !bio.woodscape.is_sprouted(*i as u32))
-                    .filter(|(_, p)| {
-                        let dth = {
-                            let x = (p.theta - cth).rem_euclid(std::f32::consts::TAU);
-                            let x = x.min(std::f32::consts::TAU - x);
-                            x * hab_r
-                        };
-                        let dz = p.z - cz;
-                        dth * dth + dz * dz <= r2
-                    })
-                    .take(48)
-                    .map(|(i, p)| {
-                        let bid = bio.biome_at(ter, p.theta, p.z);
-                        let kind = forest_kind(bid, &bio.weather, ter, p.theta, p.z, p.genome_id);
-                        (i, p.clone(), kind)
-                    })
-                    .collect()
-            }
-        };
         let (Some(bio), Some(ter)) = (self.bio.as_mut(), self.t.as_ref()) else {
             return PackedFloat32Array::from([].as_slice());
         };
-        // Unload first: the grid is capped, and a full grid refuses the stand
-        // you are walking toward while still holding one a kilometre behind.
-        bio.woodscape.prune_far(center, rad * 2.2);
-        for (i, p, kind) in to_sprout {
-            if bio.woodscape.is_full() {
-                break;
-            }
-            bio.woodscape.sprout_plant(i, &p, ter, kind);
-        }
+        // Three stands per call: enough to keep up with walking, few enough
+        // that arriving at a grove costs frames of stamping, not one hitch.
+        bio.realise_stands(ter, center, rad, 3);
         PackedFloat32Array::from(bio.woodscape.lod_near(center, rad, lim).as_slice())
+    }
+
+    /// Shared material recipe: x,y,z,sx,sy,sz,kind in the local 14 m frame.
+    #[func]
+    fn tree_template(&self, form: i64) -> PackedFloat32Array {
+        let mut out = Vec::new();
+        for p in tree_form::recipe(form.clamp(0, 7) as u8) {
+            out.extend_from_slice(&p.center);
+            out.extend_from_slice(&p.size);
+            out.push(p.kind as f32);
+        }
+        PackedFloat32Array::from(out.as_slice())
+    }
+
+    #[func]
+    fn woodscape_mesh(&mut self, center: Vector3, radius: f64, last_revision: i64) -> Dictionary {
+        let _ = self.woodscape_lod(center.x as f64, center.y as f64, center.z as f64, radius, 1);
+        let mut out = Dictionary::new();
+        let Some(bio) = self.bio.as_ref() else {
+            return out;
+        };
+        let rev = bio.woodscape.revision as i64;
+        let _ = out.insert("revision", rev);
+        if rev == last_revision {
+            return out;
+        }
+        let (v, n, c, u, i) = bio
+            .woodscape
+            .surface_near([center.x, center.y, center.z], radius as f32);
+        let verts: Vec<Vector3> = v
+            .into_iter()
+            .map(|v| Vector3::new(v[0], v[1], v[2]))
+            .collect();
+        let norms: Vec<Vector3> = n
+            .into_iter()
+            .map(|v| Vector3::new(v[0], v[1], v[2]))
+            .collect();
+        let cols: Vec<Color> = c
+            .into_iter()
+            .map(|v| Color::from_rgba(v[0], v[1], v[2], v[3]))
+            .collect();
+        let uvs: Vec<Vector2> = u.into_iter().map(|v| Vector2::new(v[0], v[1])).collect();
+        let _ = out.insert("verts", PackedVector3Array::from(verts.as_slice()));
+        let _ = out.insert("normals", PackedVector3Array::from(norms.as_slice()));
+        let _ = out.insert("colors", PackedColorArray::from(cols.as_slice()));
+        let _ = out.insert("uvs", PackedVector2Array::from(uvs.as_slice()));
+        let _ = out.insert("indices", PackedInt32Array::from(i.as_slice()));
+        let _ = out.insert("blocks", bio.woodscape.len() as i64);
+        out
+    }
+    #[func]
+    fn save_woodscape(&self) -> PackedByteArray {
+        let bytes = self
+            .bio
+            .as_ref()
+            .map(|b| b.woodscape.encode_edits())
+            .unwrap_or_default();
+        PackedByteArray::from(bytes.as_slice())
+    }
+    #[func]
+    fn load_woodscape(&mut self, bytes: PackedByteArray) -> bool {
+        self.bio
+            .as_mut()
+            .map(|b| b.woodscape.decode_edits(&bytes.to_vec()))
+            .unwrap_or(false)
     }
 
     /// Place one wood (or leaf) block from the pack — attaches to neighbours.
@@ -2230,7 +2608,13 @@ impl RamaTerrain {
         } else {
             economy::bio_id::WOOD
         };
-        let cost = if as_leaf { 0.4 } else { 2.5 };
+        // Exactly what one block yields, so mining a block buys placing a
+        // block. Referenced, not repeated, so the rates cannot drift apart.
+        let cost = if as_leaf {
+            woodscape::LEAF_KG
+        } else {
+            woodscape::WOOD_KG
+        };
         // Check before taking. Taking and refunding on failure put the material
         // back at grade 0, so a rejected placement quietly downgraded the whole
         // timber stack to firewood.
@@ -2239,7 +2623,6 @@ impl RamaTerrain {
             let _ = d.insert("error", "need_material");
             return d;
         }
-        let got = self.pack.take_mass(need, cost);
         let Some(bio) = self.bio.as_mut() else {
             let _ = d.insert("ok", false);
             return d;
@@ -2250,11 +2633,79 @@ impl RamaTerrain {
         } else {
             woodscape::kind::WOOD
         };
-        bio.woodscape.set(k, kind, u32::MAX);
+        if bio.woodscape.get(k) != woodscape::kind::EMPTY || bio.woodscape.is_full() {
+            let _ = d.insert("ok", false);
+            let _ = d.insert("error", "occupied_or_full");
+            return d;
+        }
+        if !bio.woodscape.set(k, kind, u32::MAX) {
+            let _ = d.insert("ok", false);
+            return d;
+        }
+        let got = self.pack.take_mass(need, cost);
         let _ = d.insert("ok", true);
         let _ = d.insert("kind", if as_leaf { "leaf" } else { "timber" });
         let _ = d.insert("kg", got as f64);
         d
+    }
+
+    /// Stage 0 counters: what the standing forest actually is, for route
+    /// captures and the benchmark. Cheap enough to call between shots, not
+    /// every frame — it walks the population once with a neighbour grid.
+    #[func]
+    fn forest_stats(&self) -> Dictionary {
+        let mut d = Dictionary::new();
+        let (Some(bio), Some(ter)) = (self.bio.as_ref(), self.t.as_ref()) else {
+            return d;
+        };
+        let st = forest::stats(&bio.plants, &ter.hab);
+        let _ = d.insert("alive", st.alive as i64);
+        let _ = d.insert("mean_height_m", st.mean_height as f64);
+        let _ = d.insert("max_height_m", st.max_height as f64);
+        let _ = d.insert("at_clamp", st.at_clamp as i64);
+        let _ = d.insert("trunk_overlaps", st.trunk_overlaps as i64);
+        let _ = d.insert("mean_spacing_m", st.mean_spacing_m as f64);
+        let mut sp = PackedInt32Array::new();
+        for v in st.species {
+            sp.push(v as i32);
+        }
+        let _ = d.insert("species", sp);
+        let mut hh = PackedInt32Array::new();
+        for v in st.height {
+            hh.push(v as i32);
+        }
+        let _ = d.insert("height", hh);
+        let mut ss = PackedInt32Array::new();
+        for v in st.spacing {
+            ss.push(v as i32);
+        }
+        let _ = d.insert("spacing", ss);
+        // Resident material, so a route can show cost next to ecology.
+        let _ = d.insert("resident_cells", bio.woodscape.len() as i64);
+        let _ = d.insert("summary", forest::summary(&st));
+        d
+    }
+
+    /// Craft at the position the sim already tracks for station checks.
+    ///
+    /// `craft` takes theta/z because the player drives it; a UI has no business
+    /// re-deriving the player's position to ask for the same thing.
+    #[func]
+    fn craft_here(&mut self, index: i64, scale: f64) -> Dictionary {
+        let (th, z) = (self.player_theta as f64, self.player_z as f64);
+        self.craft(index, scale, th, z)
+    }
+
+    /// Display colour for any material id, across all three id namespaces.
+    ///
+    /// `world.gd` carried a hand-written id-to-Color `match` that defaulted to
+    /// dirt brown, which is why every material added since it was written piled
+    /// up looking like spoil. Declaring the colour beside the material means a
+    /// new one gets a look without remembering to edit GDScript.
+    #[func]
+    fn material_color(&self, material_id: i64) -> Color {
+        let c = economy::display_albedo(material_id.clamp(0, 255) as u8);
+        Color::from_rgb(c[0], c[1], c[2])
     }
 
     #[func]
@@ -3154,7 +3605,13 @@ impl RamaTerrain {
         let paint_run = |out: &mut [[f32; 3]], from: usize| {
             let mut win = paint::BiomeWindow::new(t.hab.radius, th_c, z_c, half);
             for (i, c) in out.iter_mut().enumerate() {
-                *c = paint::vertex_color(t, bio, Some(&mut win), m.verts[from + i], m.normals[from + i]);
+                *c = paint::vertex_color(
+                    t,
+                    bio,
+                    Some(&mut win),
+                    m.verts[from + i],
+                    m.normals[from + i],
+                );
             }
         };
         if workers > 1 && m.verts.len() > 512 {

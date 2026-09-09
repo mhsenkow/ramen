@@ -58,6 +58,7 @@ var town_marks: Array = []
 var mini_vp: SubViewport
 var mini_cam: Camera3D
 var mini_overlay: Control
+var mini_rect: TextureRect
 var ship_overlay: Control
 var hud_panels: CanvasLayer
 var reticle: Control
@@ -65,8 +66,13 @@ var home := Vector2.ZERO
 var waypoint := Vector2.ZERO
 var has_waypoint := false
 var menu: CanvasLayer
+var session: Node
+var coop_lobby: CanvasLayer
 var audio: Node
 var mini_size := 150.0
+## Map size step: 0 small, 1 medium, 2 large. Cycled by map_small / map_big.
+var map_scale := 1
+const MAP_STEPS := [0.72, 1.0, 1.42]
 const DAY_LENGTH := 420.0   # seconds per engineered day
 ## Fast-day preview: full cycle in ~DAY_LENGTH/FAST_DAY_MULT real seconds.
 const FAST_DAY_MULT := 18.0
@@ -142,9 +148,9 @@ var threaded_meshing := true
 var plant_mm: MultiMeshInstance3D
 var plant_mm_mid: MultiMeshInstance3D
 var plant_mm_far: MultiMeshInstance3D
-var woodscape_mm: MultiMeshInstance3D
+var woodscape_mm: MeshInstance3D
+var woodscape_revision := -1
 var woodscape_refresh_in := 0.0
-var woodscape_owns_near := false
 var soil_overlay: TextureRect
 var soil_mode := 0
 var catchment_cache: PackedFloat32Array = PackedFloat32Array()
@@ -155,6 +161,9 @@ var pool_refresh_in := -1.0
 var wet_refresh_in := -1.0
 var splash_life := 0.0
 var splash_origin := Vector3.ZERO
+var splash_tint := Color(0.62, 0.82, 0.92, 0.55)
+var splash_rise := 2.4
+var splash_out := 3.2
 var last_pool_cells := -1
 var last_pool_depth := -1.0
 var wet_chunk_queue: Array = []
@@ -202,6 +211,7 @@ const SIM_STEP_DAYS := 0.02  # ~ habitat days per real second at 1x
 const CATCHMENT_COOLDOWN := 0.28
 const PLANT_FILL_BUDGET := 120
 const SAVE_PATH := "user://rama_strokes.bin"
+const SAVE_WOOD := "user://rama_wood.bin"
 const SAVE_SOIL := "user://rama_soil.bin"
 const SAVE_DWELL := "user://rama_dwellings.bin"
 const SAVE_WORLD := "user://rama_world.json"
@@ -263,6 +273,12 @@ func _ready() -> void:
 	menu = load("res://scripts/menu.gd").new()
 	menu.world = self
 	add_child(menu)
+	session = load("res://scripts/session.gd").new()
+	session.world = self
+	add_child(session)
+	coop_lobby = load("res://scripts/coop_lobby.gd").new()
+	coop_lobby.world = self
+	add_child(coop_lobby)
 	audio = load("res://scripts/audio.gd").new()
 	add_child(audio)
 	if not RamaControls.cfg_exists() and not shot_mode and not selftest and not bisect and not farprobe and not parade:
@@ -355,7 +371,13 @@ func _ready() -> void:
 		add_child(pa)
 		await pa.run()
 	elif shot_mode:
-		await _take_shots()
+		if "--tree-study" in OS.get_cmdline_user_args():
+			var study = load("res://scripts/debug/tree_study.gd").new()
+			study.world = self
+			add_child(study)
+			await study.run()
+		else:
+			await _take_shots()
 	elif photo:
 		# Photo mode hides HUD (§2119).
 		if hud_panels:
@@ -1043,10 +1065,6 @@ func _build_rivers() -> void:
 	mi.extra_cull_margin = 30.0
 	river_root.add_child(mi)
 
-## Standing water free surfaces — Minecraft-style flat pools in basins.
-## Ground cover: ONE MultiMesh, one draw call, shadows off, rebuilt only when
-## the player has actually moved. 6400 tufts x ~10 tris is nothing next to the
-## 215k the terrain already costs.
 ## The second LOD tier: one mesh covering the band between the near chunks and
 ## the coarse far field, which was previously a flat plate.
 func _build_mid() -> void:
@@ -1082,6 +1100,9 @@ func refresh_mid(force := false) -> void:
 		if force:
 			print("[rama] mid field: %d tris, 1 draw call" % (d["indices"].size() / 3))
 
+## Ground cover: ONE MultiMesh, one draw call, shadows off, rebuilt only when
+## the player has actually moved. 6400 tufts x ~10 tris is nothing next to the
+## 215k the terrain already costs.
 func _build_grass() -> void:
 	var mm := MultiMesh.new()
 	mm.transform_format = MultiMesh.TRANSFORM_3D
@@ -1201,6 +1222,11 @@ func refresh_grass(force := false) -> void:
 		print("[rama] grass: %d tufts within %.0f m" % [n, grass_radius_cap])
 		print("[rama] grass: %d tufts (%d tris), 1 draw call" % [n, n * 10])
 
+## Standing water free surfaces — flat pools in basins, one mesh.
+##
+## Reads `water.depth` through `lake_mesh()`, so it shows what the sim believes
+## right now; it is scheduled, not called directly, because a held dig would
+## otherwise rebuild it once per bite.
 func _build_pools() -> void:
 	if lake_root and is_instance_valid(lake_root):
 		lake_root.queue_free()
@@ -2189,19 +2215,10 @@ func refresh_stockpiles() -> void:
 		var xf := frame_at(th, zz, gr - vr * 0.18)
 		xf.basis = xf.basis.scaled(Vector3(vr, vr * 0.38, vr))
 		stockpile_mm.multimesh.set_instance_transform(i, xf)
-		var col := Color(0.46, 0.36, 0.26)
-		match mid:
-			2: col = Color(0.44, 0.30, 0.22)  # clay
-			3: col = Color(0.58, 0.46, 0.32)  # sandstone
-			4: col = Color(0.28, 0.28, 0.30)  # basalt
-			5: col = Color(0.40, 0.26, 0.18)  # ferrous
-			6: col = Color(0.72, 0.80, 0.88)  # ice
-			100: col = Color(0.30, 0.48, 0.24) # greens
-			101: col = Color(0.48, 0.34, 0.20) # timber
-			102: col = Color(0.55, 0.48, 0.30) # fibre
-			103: col = Color(0.62, 0.52, 0.28) # seed
-			104: col = Color(0.28, 0.52, 0.78) # water
-		stockpile_mm.multimesh.set_instance_color(i, col)
+		# Colour comes from the material, not from a table here. This match had
+		# ten ids and a dirt-brown default, so coal, fruit, grass, flowers,
+		# molten rock, tea and thatch all piled up looking like spoil.
+		stockpile_mm.multimesh.set_instance_color(i, terrain.material_color(mid))
 
 ## Debounced — holding dig used to rebuild the Multimesh every bite.
 func schedule_stockpile_refresh() -> void:
@@ -2218,14 +2235,27 @@ func _tick_stockpile_refresh(dt: float) -> void:
 
 const SPLASH_N := 18
 const SPLASH_LIFE := 0.38
+const WATER_TINT := Color(0.62, 0.82, 0.92, 0.55)
+const TIMBER_TINT := Color(0.44, 0.29, 0.17, 0.92)
+const LEAF_TINT := Color(0.30, 0.48, 0.20, 0.90)
 
-func spawn_dig_splash(p: Vector3, strength: float) -> void:
+## One particle burst, reused for water and for chopping debris.
+##
+## Water lofts and chips fall, so rise is signed and both are given their own
+## outward speed and tint. The two cannot overlap in practice — a vegetation
+## dig returns before the water check — so one MultiMesh serves both, which is
+## the whole reason for generalising rather than building a second system.
+func _spawn_burst(p: Vector3, strength: float, n: int, tint: Color,
+		rise: float, out: float, bias: Vector3) -> void:
 	if splash_mm == null:
 		return
 	splash_origin = p
 	splash_life = SPLASH_LIFE
+	splash_tint = tint
+	splash_rise = rise
+	splash_out = out
 	splash_mm.visible = true
-	splash_mm.multimesh.instance_count = SPLASH_N
+	splash_mm.multimesh.instance_count = n
 	var up := Vector3(-p.x, -p.y, 0.0)
 	if up.length_squared() < 1e-6:
 		up = Vector3.UP
@@ -2233,21 +2263,35 @@ func spawn_dig_splash(p: Vector3, strength: float) -> void:
 		up = up.normalized()
 	var rng := RandomNumberGenerator.new()
 	rng.seed = int(Time.get_ticks_msec())
-	for i in SPLASH_N:
+	for i in n:
 		var lateral := Vector3(rng.randf_range(-1, 1), rng.randf_range(-1, 1), rng.randf_range(-1, 1))
 		lateral = lateral - up * lateral.dot(up)
 		if lateral.length_squared() < 1e-6:
 			lateral = up.cross(Vector3.FORWARD)
-		lateral = lateral.normalized()
+		lateral = lateral.normalized() + bias
 		var dist: float = rng.randf_range(0.25, 1.4 + strength * 0.55)
 		var loft: float = rng.randf_range(0.15, 0.85 + strength * 0.25)
-		var xf := Transform3D(Basis.IDENTITY, p + lateral * dist + up * loft)
-		var s: float = rng.randf_range(0.35, 0.85)
-		xf.basis = xf.basis.scaled(Vector3(s, s, s))
+		var xf := Transform3D(Basis.IDENTITY, p + lateral * dist + up * loft * signf(rise))
+		var sc: float = rng.randf_range(0.35, 0.85)
+		xf.basis = xf.basis.scaled(Vector3(sc, sc, sc))
 		splash_mm.multimesh.set_instance_transform(i, xf)
-		splash_mm.multimesh.set_instance_color(i, Color(0.62, 0.82, 0.92, 0.55))
+		splash_mm.multimesh.set_instance_color(i, tint)
+
+func spawn_dig_splash(p: Vector3, strength: float) -> void:
+	_spawn_burst(p, strength, SPLASH_N, WATER_TINT, 2.4, 3.2, Vector3.ZERO)
 	if audio:
 		audio.splash(strength)
+
+## Chips off the cut. The count and spread follow the bite, so the brush size
+## reads in the debris as well as in the hole it leaves.
+func spawn_dig_chips(p: Vector3, normal: Vector3, blocks: int, timber: bool) -> void:
+	var strength: float = clampf(pow(float(maxi(blocks, 1)), 0.34), 1.0, 4.0)
+	var n: int = clampi(6 + blocks * 2, 6, 30)
+	# Thrown back out of the cut, toward whoever swung.
+	var bias: Vector3 = normal.normalized() * 0.7 if normal.length_squared() > 1e-6 \
+			else Vector3.ZERO
+	_spawn_burst(p, strength, n, TIMBER_TINT if timber else LEAF_TINT,
+			-1.2, 2.4, bias)
 
 func _clear_splash() -> void:
 	splash_life = 0.0
@@ -2280,12 +2324,14 @@ func _tick_splash(dt: float) -> void:
 			outward = outward.normalized()
 		else:
 			outward = up
-		xf.origin += up * (2.4 * dt) + outward * (3.2 * dt)
+		xf.origin += up * (splash_rise * dt) + outward * (splash_out * dt)
 		# Shrink as they fade so nothing reads as a stuck bead.
 		var s: float = 0.35 + 0.65 * fade
 		xf.basis = Basis.IDENTITY.scaled(Vector3(s, s, s))
 		splash_mm.multimesh.set_instance_transform(i, xf)
-		splash_mm.multimesh.set_instance_color(i, Color(0.62, 0.82, 0.92, 0.55 * fade))
+		var c := splash_tint
+		c.a *= fade
+		splash_mm.multimesh.set_instance_color(i, c)
 	if splash_life <= 0.0:
 		_clear_splash()
 
@@ -3031,118 +3077,69 @@ func place_module(p: Vector3, kind: int, from_save: bool = false) -> void:
 	modules.append(node)
 
 func _build_plants() -> void:
-	# Eight growth algorithms × near/mid LOD. Each mesh is a full recursive
-	# branching tree (block vocabulary, natural forks). Excavate trunks for timber.
+	# One shared construction recipe at every distance. Instances are inexpensive
+	# visual caches of the same wood/leaf volumes the near material grid contains.
 	plant_species_near = []
 	plant_species_mid = []
 	for kind in 8:
-		var near_mesh: ArrayMesh = RamaTrees.mesh_for(kind, 1.0, kind * 104729 + 17)
-		var mid_mesh: ArrayMesh = RamaTrees.mesh_for(kind, 0.78, kind * 104729 + 91)
-		var near := _make_plant_layer("PlantsNear_%d" % kind, near_mesh, 120.0, 240.0)
-		near.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
-		if near.material_override is ShaderMaterial:
-			near.material_override.set_shader_parameter("model_height", RamaTrees.TREE_H)
-			near.material_override.set_shader_parameter("sway", 0.045)
-		plant_species_near.append(near)
-		var mid := _make_plant_layer("PlantsMid_%d" % kind, mid_mesh, 200.0, 360.0)
-		mid.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
-		if mid.material_override is ShaderMaterial:
-			mid.material_override.set_shader_parameter("model_height", RamaTrees.TREE_H * 0.78)
-			mid.material_override.set_shader_parameter("sway", 0.03)
-		plant_species_mid.append(mid)
-	plant_mm_far = _make_plant_layer("PlantsFar", RamaTrees.billboard_mesh(), 320.0, 520.0)
-	plant_mm_far.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
-	if plant_mm_far.material_override is ShaderMaterial:
-		plant_mm_far.material_override.set_shader_parameter("sway", 0.0)
-		plant_mm_far.material_override.set_shader_parameter("model_height", 4.0)
+		var mesh: ArrayMesh = RamaTrees.from_materials(terrain.tree_template(kind))
+		var mi := _make_plant_layer("Plants_%d" % kind, mesh, 400.0, 480.0)
+		mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+		mi.material_override.set_shader_parameter("model_height", RamaTrees.TREE_H)
+		mi.material_override.set_shader_parameter("proxy", true)
+		mi.material_override.set_shader_parameter("sway", 0.0)
+		mi.material_override.set_shader_parameter("haze_start", 90.0)
+		mi.material_override.set_shader_parameter("haze_end", 900.0)
+		plant_species_near.append(mi)
 	plant_mm = plant_species_near[0]
-	plant_mm_mid = plant_species_mid[0]
 	_refresh_plants()
 
-## Minecraft-style connected wood/leaf cubes. Same grid → faces combine.
+## One exposed-surface mesh of authoritative wood/leaf cells. Interior faces
+## never reach the GPU; unchanged geometry never crosses the Rust/Godot boundary.
 func _build_woodscape() -> void:
-	var st := SurfaceTool.new()
-	st.begin(Mesh.PRIMITIVE_TRIANGLES)
-	# Unit cube centred on origin; instance transform places it.
-	var e := 0.54
-	_add_prism(st, Vector3.ZERO, Vector3(e, e, e), Color(1, 1, 1, 1))
-	st.generate_normals()
-	var mesh := st.commit()
-	var mm := MultiMesh.new()
-	mm.transform_format = MultiMesh.TRANSFORM_3D
-	mm.use_colors = true
-	# CUSTOM.x carries how far up its own crown a block sits. A lone instanced
-	# cube has no local height for the shader to read, so without this every
-	# block shades as ground contact — a uniformly dark, swayless forest.
-	mm.use_custom_data = true
-	mm.mesh = mesh
-	mm.instance_count = 0
-	woodscape_mm = MultiMeshInstance3D.new()
-	woodscape_mm.multimesh = mm
+	woodscape_mm = MeshInstance3D.new()
 	var mat := ShaderMaterial.new()
 	mat.shader = load("res://shaders/tree.gdshader")
-	mat.set_shader_parameter("haze_start", 80.0)
-	mat.set_shader_parameter("haze_end", 420.0)
-	mat.set_shader_parameter("fade_start", 70.0)
-	mat.set_shader_parameter("fade_end", 130.0)
-	mat.set_shader_parameter("sway", 0.02)
-	# Crown height comes from instance data, not from the cube's own vertices.
-	mat.set_shader_parameter("up_from_instance", true)
+	mat.set_shader_parameter("material_grid", true)
+	mat.set_shader_parameter("fade_start", 55.0)
+	mat.set_shader_parameter("fade_end", 85.0)
+	mat.set_shader_parameter("haze_start", 90.0)
+	mat.set_shader_parameter("haze_end", 900.0)
+	mat.set_shader_parameter("sway", 0.0)
 	woodscape_mm.material_override = mat
 	woodscape_mm.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
 	woodscape_mm.name = "Woodscape"
 	add_child(woodscape_mm)
 	woodscape_refresh_in = 0.05
 
-## Voxel stands stream within this radius — matched to the sim's near plant
-## tier (`plants_lod` r_near) so the blocks replace exactly the Multimesh trees
-## that `_hide_near_trees` switches off, with no band left empty between them.
-const WOODSCAPE_RADIUS := 92.0
-const WOODSCAPE_LIMIT := 12000
-## Bark and foliage keys for `tree.gdshader`. RGB is a luminance ratio the
-## shader multiplies into `bark_tint` (alpha 0) or reads as pigment (alpha 1),
-## so these track the near-tree instance colours; a plain white wood key came
-## out as 3.5x bark and read as glowing orange cubes.
-const WOOD_KEY := Color(0.30, 0.28, 0.26, 0.0)
-const LEAF_KEY := Color(0.16, 0.44, 0.22, 1.0)
+const WOODSCAPE_RADIUS := 98.0
 
 func refresh_woodscape(force := false) -> void:
 	if woodscape_mm == null or player == null or terrain == null:
 		return
 	if not force and woodscape_refresh_in > 0.0:
 		return
-	woodscape_refresh_in = 0.22
-	var feet: Vector3 = player.feet_pos() if player.has_method("feet_pos") else player.global_position
-	var src: PackedFloat32Array = terrain.woodscape_lod(
-			feet.x, feet.y, feet.z, WOODSCAPE_RADIUS, WOODSCAPE_LIMIT)
-	var n: int = int(src.size() / 5.0)
-	var mm: MultiMesh = woodscape_mm.multimesh
-	if n < 1:
-		mm.instance_count = 0
-		_hide_near_trees(0)
+	woodscape_refresh_in = 0.35
+	var data: Dictionary = terrain.woodscape_mesh(player.feet_pos(), WOODSCAPE_RADIUS, woodscape_revision)
+	if not data.has("verts"):
 		return
-	mm.instance_count = n
-	for i in n:
-		var s: int = i * 5
-		mm.set_instance_transform(i, Transform3D(Basis.IDENTITY,
-				Vector3(src[s], src[s + 1], src[s + 2])))
-		mm.set_instance_color(i, WOOD_KEY if int(src[s + 3]) == 1 else LEAF_KEY)
-		# How far up its own crown this block sits — see `up_from_instance`.
-		mm.set_instance_custom_data(i, Color(src[s + 4], 0.0, 0.0, 0.0))
-	_hide_near_trees(n)
-
-## One vocabulary at close range: where voxel stands are resident, the near
-## Multimesh trees stand down. Hysteresis on the count, because the threshold
-## sits right where a stand streams in and a bare comparison flickered the
-## whole near tier on and off as you walked.
-func _hide_near_trees(blocks: int) -> void:
-	if blocks > 240:
-		woodscape_owns_near = true
-	elif blocks < 60:
-		woodscape_owns_near = false
-	for mi in plant_species_near:
-		if mi:
-			mi.visible = not woodscape_owns_near
+	woodscape_revision = int(data["revision"])
+	if data["indices"].is_empty():
+		woodscape_mm.mesh = null
+	else:
+		var arr := []
+		arr.resize(Mesh.ARRAY_MAX)
+		arr[Mesh.ARRAY_VERTEX] = data["verts"]
+		arr[Mesh.ARRAY_NORMAL] = data["normals"]
+		arr[Mesh.ARRAY_COLOR] = data["colors"]
+		arr[Mesh.ARRAY_TEX_UV] = data["uvs"]
+		arr[Mesh.ARRAY_INDEX] = data["indices"]
+		var mesh := ArrayMesh.new()
+		mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arr)
+		woodscape_mm.mesh = mesh
+	# Residency belongs to each stand. A full material cache keeps its matching
+	# proxy visible; a harvested stand never resurrects an untouched distant tree.
+	_refresh_plants()
 
 ## Form id from plants_lod (0 conifer … 7 giant). Biome fallback if kind absent.
 func _biome_species(bid: int, kind: int = -1) -> int:
@@ -3185,6 +3182,7 @@ func _make_plant_layer(layer_name: String, mesh: Mesh, fade_min: float, fade_max
 	var mm := MultiMesh.new()
 	mm.transform_format = MultiMesh.TRANSFORM_3D
 	mm.use_colors = true
+	mm.use_custom_data = true
 	mm.mesh = mesh
 	mm.instance_count = 1
 	mm.set_instance_transform(0, Transform3D(Basis().scaled(Vector3.ZERO), Vector3.ZERO))
@@ -3206,7 +3204,7 @@ func _make_plant_layer(layer_name: String, mesh: Mesh, fade_min: float, fade_max
 	add_child(mi)
 	return mi
 
-const PLANT_STRIDE := 8  # theta,z,stem,leaf,alive,lod,biome_id,genome_id
+const PLANT_STRIDE := 9  # theta,z,stem,leaf,alive,lod,biome_id,form,residency
 const BIOME_PLANT_COL := [
 	Color(0.18, 0.38, 0.36), # water edge
 	Color(0.14, 0.42, 0.28), # wetland
@@ -3230,28 +3228,15 @@ func _refresh_plants() -> void:
 	last_plants_alive = int(last_sim.get("plants", -1))
 	plant_anchor = Vector2(player.theta, player.z)
 	plant_data = terrain.plants_lod(player.theta, player.z, plant_lod_radius)
-	var stride: int = PLANT_STRIDE if plant_data.size() % PLANT_STRIDE == 0 else 7
-	# Buckets: [lod][species] → index list
-	var buckets: Array = []
-	for _lod in 3:
-		var sp: Array = [[], [], [], [], [], [], [], []]
-		buckets.append(sp)
-	var n: int = int(plant_data.size() / float(stride))
-	for i in n:
-		var base: int = i * stride
-		var lod: int = clampi(int(plant_data[base + 5]), 0, 2)
-		var bid: int = clampi(int(plant_data[base + 6]), 0, BIOME_PLANT_COL.size() - 1)
-		var genome: int = int(plant_data[base + 7]) if stride >= 8 else -1
-		var sp: int = _biome_species(bid, genome)
-		buckets[lod][sp].append(i)
-	for sp in 8:
-		_fill_plant_bucket(plant_species_near[sp], plant_data, buckets[0][sp], 1.0, stride)
-		_fill_plant_bucket(plant_species_mid[sp], plant_data, buckets[1][sp], 1.25, stride)
-	# Far: merge all species into one billboard layer.
-	var far_idx: Array = []
-	for sp in 8:
-		far_idx.append_array(buckets[2][sp])
-	_fill_plant_bucket(plant_mm_far, plant_data, far_idx, 1.7, stride)
+	var buckets: Array = [[], [], [], [], [], [], [], []]
+	for i in int(plant_data.size() / float(PLANT_STRIDE)):
+		var base: int = i * PLANT_STRIDE
+		if int(plant_data[base + 8]) == 2:
+			continue # modified geometry remains the only source of truth
+		var form: int = clampi(int(plant_data[base + 7]), 0, 7)
+		buckets[form].append(i)
+	for form in 8:
+		_fill_plant_bucket(plant_species_near[form], plant_data, buckets[form], 1.0)
 
 func _plant_instance_xform(data: PackedFloat32Array, i: int, scale_boost: float, stride: int = PLANT_STRIDE) -> Transform3D:
 	var base: int = i * stride
@@ -3274,52 +3259,16 @@ func _plant_instance_xform(data: PackedFloat32Array, i: int, scale_boost: float,
 	elif sp == 7:
 		h = clampf(12.0 + stem * 42.0 + leaf * 12.0, 10.0, 42.0) * scale_boost
 	var xf := frame_at(th, zz, gr)
-	var jit: float = fposmod(sin(th * 733.1 + zz * 41.7) * 43758.5453, 1.0)
-	var jit2: float = fposmod(sin(th * 191.3 - zz * 97.1) * 24634.6345, 1.0)
-	xf.basis = xf.basis.rotated(xf.basis.y, jit * TAU)
-	# Mild spinward lean — taller trees tip toward +theta (drum rotation).
-	var spin_lean: float = (0.035 + stem * 0.04) * (0.7 + jit * 0.6)
-	if sp == 6:
-		spin_lean *= 1.8
-	xf.basis = xf.basis.rotated(xf.basis.z, spin_lean)
-	xf.basis = xf.basis.rotated(xf.basis.x, (jit - 0.5) * 0.06)
-	var w: float = (1.0 + leaf * 0.55 + stem * 0.45) * scale_boost * (0.88 + jit2 * 0.28)
-	if sp == 3:
-		w *= 1.2
-	elif sp == 4:
-		w *= 0.5
-	elif sp == 6:
-		w *= 1.4
-	elif sp == 7:
-		w *= 1.55
-	var mesh_h: float = RamaTrees.TREE_H
-	if sp == 3 or sp == 4:
-		mesh_h = 3.0
-	elif sp == 5:
-		mesh_h = RamaTrees.TREE_H * 0.55
-	var s: float = h / mesh_h
-	xf.basis = xf.basis.scaled(Vector3(w * s, s, w * s))
+	# Must match tree_form::dimensions/yaw; the distance tier cannot change size.
+	var yaw: float = sin(th * 127.1 + zz * 0.013) * PI
+	xf.basis = xf.basis * Basis(Vector3.UP, yaw)
+	var width: float = clampf(0.80 + leaf * 0.35, 0.75, 1.25)
+	var scale_y: float = h / RamaTrees.TREE_H
+	xf.basis = xf.basis * Basis.from_scale(Vector3(scale_y * width, scale_y, scale_y * width))
 	return xf
 
-func _plant_instance_color(data: PackedFloat32Array, i: int, stride: int = PLANT_STRIDE) -> Color:
-	var base: int = i * stride
-	var stem: float = data[base + 2]
-	var leaf: float = data[base + 3]
-	var bid: int = clampi(int(data[base + 6]), 0, BIOME_PLANT_COL.size() - 1)
-	var th: float = data[base]
-	var zz: float = data[base + 1]
-	var jit: float = fposmod(sin(th * 733.1 + zz * 41.7) * 43758.5453, 1.0)
-	var jit2: float = fposmod(sin(th * 191.3 - zz * 97.1) * 24634.6345, 1.0)
-	var base_col: Color = BIOME_PLANT_COL[bid]
-	var tint := Color(
-		base_col.r + leaf * 0.10 - stem * 0.02 + (jit - 0.5) * 0.08,
-		base_col.g + leaf * 0.14 + (jit2 - 0.5) * 0.06,
-		base_col.b + stem * 0.03 + (jit - 0.5) * 0.04)
-	if jit > 0.82:
-		tint = tint.lerp(Color(0.36, 0.34, 0.12), 0.35)
-	elif jit < 0.12:
-		tint = tint.lerp(Color(0.08, 0.28, 0.18), 0.30)
-	return tint
+func _plant_instance_color(data: PackedFloat32Array, i: int, _stride: int = PLANT_STRIDE) -> Color:
+	return RamaTrees.PIGMENTS[clampi(int(data[i * PLANT_STRIDE + 7]), 0, 7)]
 
 func _fill_plant_bucket(mi: MultiMeshInstance3D, data: PackedFloat32Array, indices: Array, scale_boost: float, stride: int = PLANT_STRIDE) -> void:
 	if mi == null:
@@ -3333,6 +3282,7 @@ func _fill_plant_bucket(mi: MultiMeshInstance3D, data: PackedFloat32Array, indic
 		var i: int = indices[j]
 		mi.multimesh.set_instance_transform(j, _plant_instance_xform(data, i, scale_boost, stride))
 		mi.multimesh.set_instance_color(j, _plant_instance_color(data, i, stride))
+		mi.multimesh.set_instance_custom_data(j, Color(data[i * stride + 8], 0, 0, 0))
 
 # ------------------------------------------------------------------ player --
 
@@ -3395,6 +3345,7 @@ func _process(_dt: float) -> void:
 	woodscape_refresh_in = maxf(woodscape_refresh_in - _dt, 0.0)
 	if woodscape_refresh_in <= 0.0:
 		refresh_woodscape()
+	_tick_map_keys()
 	_tick_catchment(_dt)
 	_tick_splash(_dt)
 	_tick_catchment_pulse(_dt)
@@ -3506,6 +3457,9 @@ func _autosave_slot() -> void:
 	print("[rama] autosave slot %d" % slot)
 
 func _tick_biosphere(dt: float) -> void:
+	# Guests do not advance the authoritative sim — host owns sim_tick.
+	if session and session.joined:
+		return
 	sim_accum += dt * SIM_STEP_DAYS
 	# Smaller steps more often → soft ticks instead of one fat hitch every ~6s.
 	if sim_accum < 0.045:
@@ -3522,12 +3476,23 @@ func _tick_biosphere(dt: float) -> void:
 	visual_phase = 0
 	var pools: int = int(last_sim.get("pools", 0))
 	var pdepth: float = float(last_sim.get("pool_depth", 0.0))
-	if pools != last_pool_cells or absf(pdepth - last_pool_depth) > 0.08:
+	# The sim only re-routes drainage every so often, and a dig's rebuild lands
+	# a beat after the dig itself — later than the 0.35 s pool refresh the dig
+	# scheduled. Without this the new water was computed and simply never
+	# drawn, which read as "water isn't updating after I dig".
+	if bool(last_sim.get("water_rebuilt", false)):
+		last_pool_cells = pools
+		last_pool_depth = pdepth
+		schedule_pool_refresh()
+		schedule_flow_refresh()
+	elif pools != last_pool_cells or absf(pdepth - last_pool_depth) > 0.08:
 		last_pool_cells = pools
 		last_pool_depth = pdepth
 		schedule_pool_refresh()
 	if float(last_sim.get("sediment", 0.0)) > 2.0:
 		schedule_flow_refresh()
+	if session and session.hosting:
+		session._flush_host_events()
 
 func _tick_deferred_visuals() -> void:
 	if sim_frame_cooldown > 0:
@@ -3646,6 +3611,10 @@ func save_world() -> void:
 	if fd:
 		fd.store_buffer(dwell)
 		fd.close()
+	var wood_file := FileAccess.open(SAVE_WOOD, FileAccess.WRITE)
+	if wood_file:
+		wood_file.store_buffer(terrain.save_woodscape())
+		wood_file.close()
 	var props := {
 		"modules": [],
 		"waypoint": [waypoint.x, waypoint.y],
@@ -3691,6 +3660,14 @@ func load_world() -> void:
 	if not terrain.load_strokes(strokes):
 		print("[rama] load_strokes failed")
 		return
+	if FileAccess.file_exists(SAVE_WOOD):
+		var wood_file := FileAccess.open(SAVE_WOOD, FileAccess.READ)
+		if wood_file:
+			if not terrain.load_woodscape(wood_file.get_buffer(wood_file.get_length())):
+				push_warning("Could not restore wood/leaf material edits")
+			wood_file.close()
+		woodscape_revision = -1
+		refresh_woodscape(true)
 	if FileAccess.file_exists(SAVE_SOIL):
 		var fs := FileAccess.open(SAVE_SOIL, FileAccess.READ)
 		if fs:
@@ -3826,6 +3803,9 @@ func _clock_str() -> String:
 ## Panels are declared once, as data. Adding a readout is one add_row call.
 func _build_hud() -> void:
 	ui = load("res://scripts/ui/hud.gd").new()
+	# The pack page reads the live inventory. Optional by design — the HUD is
+	# instantiated without a world by the load gate and the render harnesses.
+	ui.sim = terrain
 	add_child(ui)
 	if audio and audio.has_method("_caption"):
 		audio.caption_cb = func(t: String):
@@ -4008,6 +3988,10 @@ func _push_hud(e: float, fx: float, heavy: bool = true) -> void:
 	ui.put("habitat", "grav", "%.2f m/s²  ·  %.0f m radius" % [P["gravity"], P["radius"]])
 
 	var pk: Dictionary = terrain.inventory()
+	if session and session.is_online() and session.has_method("inventory_snapshot"):
+		pk = session.inventory_snapshot()
+	elif session and session.is_online() and terrain.has_method("inventory_for"):
+		pk = terrain.inventory_for(session.local_actor())
 	var kg: float = float(pk.get("mass_kg", 0.0))
 	var maxkg: float = maxf(float(pk.get("max_mass_kg", 90.0)), 1.0)
 	var vfrac: float = float(pk.get("volume_frac", 0.0))
@@ -4351,6 +4335,7 @@ func _build_panels() -> void:
 	mrect.modulate = Color(1, 1, 1, 0.92)
 	mrect.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	hud_panels.add_child(mrect)
+	mini_rect = mrect
 
 	mini_overlay = Control.new()
 	mini_overlay.set_script(load("res://scripts/minimap_overlay.gd"))
@@ -4388,7 +4373,131 @@ func _build_panels() -> void:
 	soil_chip_label.add_theme_constant_override("outline_size", 4)
 	soil_chip_label.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	hud_panels.add_child(soil_chip_label)
+	_layout_maps()
 	_refresh_soil_overlay()
+
+## Size and place both maps from one step, so `,` and `.` move the whole
+## cluster together. The sizes were hardcoded at construction, which meant the
+## maps could not be resized at all and there was nowhere for a control to act.
+func _layout_maps() -> void:
+	var k: float = MAP_STEPS[clampi(map_scale, 0, MAP_STEPS.size() - 1)]
+	var mw: float = round(300.0 * k)
+	var mh: float = round(190.0 * k)
+	var side: float = round(236.0 * k)
+
+	# Explicit anchors and offsets, not `position` / `size`.
+	#
+	# `Control.position` is parent-space, so for a control anchored to the
+	# right edge the setter has to convert it into offsets — and reading it
+	# back does not return what you set. Applying the construction-time
+	# `position = Vector2(-mw - 18, 18)` a SECOND time therefore does not
+	# reproduce the first result, it shifts the control again, which put both
+	# maps off screen entirely. Offsets are what the anchors actually use, and
+	# assigning them is idempotent.
+	for n in [biome_tex_rect, ship_overlay]:
+		if n:
+			_pin_top_right(n, mw, mh)
+	if biome_tex_rect:
+		# Without this the control cannot shrink below the texture's own
+		# 384 x 240, so it ignored the 300 x 190 it was given and spilled out
+		# under its own frame and off the right edge. `soil_overlay` already
+		# sets this for the same reason. It is also what makes `,` / `.`
+		# actually resize the map rather than just move it.
+		biome_tex_rect.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+	if map_label:
+		map_label.anchor_left = 1.0
+		map_label.anchor_right = 1.0
+		map_label.anchor_top = 0.0
+		map_label.anchor_bottom = 0.0
+		map_label.offset_left = -mw - 18.0
+		map_label.offset_right = -18.0
+		map_label.offset_top = mh + 20.0
+		map_label.offset_bottom = mh + 44.0
+	for n in [mini_rect, mini_overlay, soil_overlay]:
+		if n:
+			_pin_bottom_right(n, side, side)
+	if soil_chip:
+		_pin_bottom_right(soil_chip, 12.0, 12.0)
+		soil_chip.offset_left = -side + 2.0
+		soil_chip.offset_right = -side + 14.0
+		soil_chip.offset_top = -26.0
+		soil_chip.offset_bottom = -14.0
+	if soil_chip_label:
+		soil_chip_label.anchor_left = 1.0
+		soil_chip_label.anchor_right = 1.0
+		soil_chip_label.anchor_top = 1.0
+		soil_chip_label.anchor_bottom = 1.0
+		soil_chip_label.offset_left = -side + 18.0
+		soil_chip_label.offset_right = -8.0
+		soil_chip_label.offset_top = -40.0
+		soil_chip_label.offset_bottom = -20.0
+
+	# Resizing a SubViewport recreates its render target, and this one is
+	# UPDATE_DISABLED between manual frames — so a resize without re-taking the
+	# texture leaves the plan view blank for good.
+	if mini_vp and mini_vp.size != Vector2i(int(side), int(side)):
+		mini_vp.size = Vector2i(int(side), int(side))
+		if mini_rect:
+			mini_rect.texture = mini_vp.get_texture()
+		mini_vp.render_target_update_mode = SubViewport.UPDATE_ONCE
+	if ship_overlay:
+		ship_overlay.queue_redraw()
+	if mini_overlay:
+		mini_overlay.queue_redraw()
+
+func _pin_top_right(n: Control, w: float, h: float) -> void:
+	n.anchor_left = 1.0
+	n.anchor_right = 1.0
+	n.anchor_top = 0.0
+	n.anchor_bottom = 0.0
+	n.offset_left = -w - 18.0
+	n.offset_right = -18.0
+	n.offset_top = 18.0
+	n.offset_bottom = 18.0 + h
+
+func _pin_bottom_right(n: Control, w: float, h: float) -> void:
+	n.anchor_left = 1.0
+	n.anchor_right = 1.0
+	n.anchor_top = 1.0
+	n.anchor_bottom = 1.0
+	n.offset_left = -w - 18.0
+	n.offset_right = -18.0
+	n.offset_top = -h - 18.0
+	n.offset_bottom = -18.0
+
+## `O` swaps the whole-drum map between unrolled and an oblique 3D read of the
+## ship. The biome texture only makes sense unrolled, so it hides in 3D.
+func _toggle_map_mode() -> void:
+	if ship_overlay == null:
+		return
+	ship_overlay.mode = 1 - int(ship_overlay.mode)
+	if biome_tex_rect:
+		biome_tex_rect.visible = ship_overlay.mode == 0
+	if map_label:
+		map_label.text = ("KEPLER DRUM · whole ship" if ship_overlay.mode == 1
+				else "KEPLER DRUM · live drainage")
+	ship_overlay.queue_redraw()
+
+## Pressed once, not held: `has_action` guards keep a config saved before these
+## actions existed from erroring every frame.
+func _pressed(id: String) -> bool:
+	var a: String = RamaControls.act(id)
+	return InputMap.has_action(a) and Input.is_action_just_pressed(a)
+
+func _tick_map_keys() -> void:
+	if _pressed("map_mode"):
+		_toggle_map_mode()
+	var step := 0
+	if _pressed("map_small"):
+		step = -1
+	elif _pressed("map_big"):
+		step = 1
+	if step != 0:
+		var want: int = clampi(map_scale + step, 0, MAP_STEPS.size() - 1)
+		if want != map_scale:
+			map_scale = want
+			_layout_maps()
+			note("maps %s" % ["small", "medium", "large"][map_scale])
 
 func _refresh_soil_overlay() -> void:
 	if soil_overlay == null or terrain == null:
@@ -4475,9 +4584,20 @@ func pose_ghost(g: Node3D, p: Vector3, kind: int) -> void:
 	var arc_step: float = 2.0 / float(P["radius"])
 	th = round(th / arc_step) * arc_step
 	var z: float = round(p.z / 2.0) * 2.0
-	g.transform = frame_at(th, z, ground_at(th, z))
 	var mi: MeshInstance3D = g.get_node("Body")
 	var sz: Vector3 = spec["size"]
+	# Settle on the highest ground under the whole footprint, not just under the
+	# centre. Posed from its centre, a 9 m slab floats over a pit you just dug
+	# and buries itself in a rise — either way it stops reading as "this is
+	# where it goes". Smaller r is higher, so the minimum is the high corner.
+	# Five raymarches instead of one, affordable only because the ghost is now
+	# gated on placement intent rather than shown permanently.
+	var hab_r: float = float(P["radius"])
+	var gr: float = ground_at(th, z)
+	for ox in [-sz.x * 0.5, sz.x * 0.5]:
+		for oz in [-sz.z * 0.5, sz.z * 0.5]:
+			gr = minf(gr, ground_at(th + ox / hab_r, z + oz))
+	g.transform = frame_at(th, z, gr)
 	mi.mesh.size = sz
 	mi.position = Vector3(0, sz.y * 0.5, 0)
 	var cost: Label3D = g.get_node("Cost")
@@ -4646,7 +4766,7 @@ func _apply_reduced_motion() -> void:
 		return
 	_reduced_motion_applied = want
 	var sway: float = 0.0 if want == 1 else 0.22
-	var tree_sway: float = 0.0 if want == 1 else 0.055
+	var tree_sway: float = 0.0 # solid wood/leaf volumes must stay aligned with mining
 	if grass_mm and grass_mm.material_override is ShaderMaterial:
 		(grass_mm.material_override as ShaderMaterial).set_shader_parameter("sway", sway)
 	var layers: Array = []

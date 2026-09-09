@@ -470,7 +470,8 @@ impl Weather {
                 self.sky_event = sky::CLEAR;
                 self.sky_intensity = 0.0;
                 self.fog_factor = 0.0;
-                self.sky_cooldown = (0.28 + 0.22 * (1.0 - self.mean_humidity).clamp(0.0, 1.0)) / pace.sqrt();
+                self.sky_cooldown =
+                    (0.28 + 0.22 * (1.0 - self.mean_humidity).clamp(0.0, 1.0)) / pace.sqrt();
             }
             return;
         }

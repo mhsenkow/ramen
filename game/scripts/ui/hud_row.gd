@@ -35,14 +35,20 @@ func setup(row_key: String, caption: String, with_bar: bool) -> void:
 	readout.add_child(_value_label)
 	if with_bar:
 		_bar_bg = ColorRect.new()
-		_bar_bg.custom_minimum_size = Vector2(0, 3)
-		_bar_bg.color = Color(0.62, 0.70, 0.76, 0.17)
+		# A fixed-width meter pinned under the value, not a full-bleed rule.
+		# Stretched across a wide panel a full gauge is indistinguishable from
+		# an underline, and the track was too faint to read as a track at all —
+		# so a full bar and an empty one looked like different UI, not
+		# different values.
+		_bar_bg.custom_minimum_size = Vector2(BAR_W, 4)
+		_bar_bg.size_flags_horizontal = Control.SIZE_SHRINK_END
+		_bar_bg.color = Color(0.62, 0.70, 0.76, 0.30)
 		_bar_bg.mouse_filter = Control.MOUSE_FILTER_IGNORE
 		readout.add_child(_bar_bg)
 		_bar_fill = ColorRect.new()
 		_bar_fill.color = Color(0.62, 0.78, 0.64)
 		_bar_fill.mouse_filter = Control.MOUSE_FILTER_IGNORE
-		_bar_fill.size = Vector2(0, 3)
+		_bar_fill.size = Vector2(0, 4)
 		_bar_bg.add_child(_bar_fill)
 		_bar_bg.resized.connect(_resize_gauge)
 
@@ -67,6 +73,8 @@ func _resize_gauge() -> void:
 		_bar_fill.size = Vector2(_bar_bg.size.x * clampf(_last_frac, 0.0, 1.0), 3)
 
 func apply_font_scale(font_mul: float) -> void:
+	if _bar_bg != null:
+		_bar_bg.custom_minimum_size.x = BAR_W * font_mul
 	_name_label.custom_minimum_size.x = NAME_W * font_mul
 	_name_label.add_theme_font_size_override("font_size", roundi(11.0 * font_mul))
 	_value_label.add_theme_font_size_override("font_size", roundi(13.0 * font_mul))

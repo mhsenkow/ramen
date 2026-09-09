@@ -17,7 +17,7 @@ pub struct Phys {
     pub bulking: f32,
 }
 
-pub const PHYS: [Phys; 9] = [
+pub const PHYS: [Phys; 10] = [
     Phys {
         bulk_kg_m3: 1600.0,
         bulking: 1.20,
@@ -54,6 +54,10 @@ pub const PHYS: [Phys; 9] = [
         bulk_kg_m3: 1550.0,
         bulking: 1.15,
     }, // sand
+    Phys {
+        bulk_kg_m3: 1350.0,
+        bulking: 1.18,
+    }, // coal — light for rock, which is why a sack of it is worth carrying
 ];
 
 #[inline]
@@ -114,6 +118,18 @@ pub struct DigYield {
 }
 
 impl DigYield {
+    /// Recompute the totals after the parts have been scaled in place.
+    ///
+    /// Needed because ice can melt out of a yield between excavation and the
+    /// pack, and the totals are what the HUD and the pack both read.
+    pub fn retotal(&mut self) {
+        self.parts
+            .retain(|p| p.mass_kg > 1e-6 || p.volume_m3 > 1e-8);
+        self.total_mass_kg = self.parts.iter().map(|p| p.mass_kg).sum();
+        self.total_loose_m3 = self.parts.iter().map(|p| p.loose_m3).sum();
+        self.total_volume_m3 = self.parts.iter().map(|p| p.volume_m3).sum();
+    }
+
     /// Fold another yield into this one (mine trees into a dig bite).
     pub fn append(&mut self, other: &DigYield) {
         for part in &other.parts {
@@ -182,9 +198,12 @@ pub fn integrate_dig_yield(t: &Terrain, stroke: &Stroke) -> DigYield {
     let step = (stroke.radius * 0.28).clamp(0.40, 0.85);
     let cell = step * step * step;
     let n = ((reach / step).ceil() as i32).max(2);
-    let mut grade_acc = [0.0f32; 9];
-    let mut grade_w = [0.0f32; 9];
-    let mut vol = [0.0f32; 9];
+    // Sized from PHYS so adding a stratum does not silently fold it into the
+    // last bucket — `.min(N)` below used to clamp anything new onto sand.
+    const NMAT: usize = PHYS.len();
+    let mut grade_acc = [0.0f32; NMAT];
+    let mut grade_w = [0.0f32; NMAT];
+    let mut vol = [0.0f32; NMAT];
 
     for iz in -n..=n {
         for iy in -n..=n {
@@ -204,7 +223,7 @@ pub fn integrate_dig_yield(t: &Terrain, stroke: &Stroke) -> DigYield {
                 if mat == mid::ALLOY {
                     continue; // undiggable — density may still read solid near hull
                 }
-                let mi = (mat as usize).min(8);
+                let mi = (mat as usize).min(NMAT - 1);
                 vol[mi] += cell;
                 if mat == mid::FERROUS {
                     let g = ore_grade(t, p);
@@ -215,7 +234,7 @@ pub fn integrate_dig_yield(t: &Terrain, stroke: &Stroke) -> DigYield {
         }
     }
 
-    for id in 0u8..9 {
+    for id in 0u8..NMAT as u8 {
         let v = vol[id as usize];
         if v <= 1e-8 {
             continue;
@@ -250,6 +269,18 @@ pub mod bio_id {
     pub const SEED: u8 = 103; // reproductive
     /// Carried liquid water (LANDSCAPE_1400 item 817) — not a dig solid.
     pub const WATER: u8 = 104;
+    // Foraged parts. `GREEN` used to stand for every soft tissue on every
+    // plant, so it was simultaneously the broth base, the tare base and the
+    // bowl topping — which meant no plant was worth walking to. These split
+    // that pool by what the plant actually is; they do not add mass to a
+    // harvest, they divide it (see `harvest_plant_as`).
+    pub const FLOWER: u8 = 105;
+    pub const FRUIT: u8 = 106;
+    pub const VEG: u8 = 107;
+    pub const GRASS: u8 = 108;
+    /// Molten rock. Not a stratum: nothing in an artificial drum melts on its
+    /// own, so this only exists downstream of a smelter (`melt_basalt`).
+    pub const LAVA: u8 = 109;
 }
 
 /// Crafted / processed material ids (Wave 2).
@@ -276,6 +307,8 @@ pub mod craft_id {
     pub const TARE: u8 = 134;
     pub const RAMEN: u8 = 135;
     pub const RICH_RAMEN: u8 = 136;
+    pub const TEA: u8 = 137;
+    pub const THATCH: u8 = 138;
 }
 
 pub fn bio_name(id: u8) -> &'static str {
@@ -285,6 +318,11 @@ pub fn bio_name(id: u8) -> &'static str {
         bio_id::FIBRE => "fibre",
         bio_id::SEED => "seed",
         bio_id::WATER => "water",
+        bio_id::FLOWER => "flowers",
+        bio_id::FRUIT => "fruit",
+        bio_id::VEG => "vegetables",
+        bio_id::GRASS => "grass",
+        bio_id::LAVA => "molten rock",
         craft_id::CHARCOAL => "charcoal",
         craft_id::CERAMIC => "ceramic",
         craft_id::GLASS => "glass",
@@ -305,8 +343,36 @@ pub fn bio_name(id: u8) -> &'static str {
         craft_id::TARE => "tare",
         craft_id::RAMEN => "ramen",
         craft_id::RICH_RAMEN => "rich ramen",
-        _ => material::name(id),
+        craft_id::TEA => "tea",
+        craft_id::THATCH => "thatch",
+        // Only defer to the geological palette for ids that actually live in
+        // it. `material::name` clamps out-of-range ids onto the last stratum,
+        // so a bio or craft id missing an arm above used to surface as "sand",
+        // and became "coal" the moment a stratum was appended. Naming the gap
+        // is the only version of this that fails loudly.
+        _ if (id as usize) < material::PALETTE.len() => material::name(id),
+        _ => "?",
     }
+}
+
+/// Fraction of excavated ice that arrives as water rather than as ice, at a
+/// given air temperature in °C.
+///
+/// The drum's ice lenses sit 8–40 m down near the endcaps, which is the only
+/// place cold enough to keep them. Cut into one in a temperate province and
+/// you have opened a freezer into a 26 °C room: most of what you lift out is
+/// meltwater before you can stack it. That is also where a habitat's water
+/// reserve is — buried ice is stored water, and this is the tap.
+///
+/// Latent heat is not modelled. What is modelled is that ice is the one
+/// stratum whose *identity* depends on staying cold, which no other material
+/// in the palette does.
+pub fn ice_melt_fraction(temp_c: f32) -> f32 {
+    if temp_c <= 0.0 {
+        return 0.0;
+    }
+    // Full melt by ~14 °C; a cold morning leaves you carrying most of it.
+    (temp_c / 14.0).clamp(0.0, 0.92)
 }
 
 pub fn material_id_by_name(name: &str) -> Option<u8> {
@@ -323,6 +389,12 @@ pub fn material_id_by_name(name: &str) -> Option<u8> {
         "fibre" => bio_id::FIBRE,
         "seed" => bio_id::SEED,
         "water" => bio_id::WATER,
+        "flowers" => bio_id::FLOWER,
+        "fruit" => bio_id::FRUIT,
+        "vegetables" => bio_id::VEG,
+        "grass" => bio_id::GRASS,
+        "molten rock" => bio_id::LAVA,
+        "coal" => mid::COAL,
         "charcoal" => craft_id::CHARCOAL,
         "ceramic" => craft_id::CERAMIC,
         "glass" => craft_id::GLASS,
@@ -343,8 +415,57 @@ pub fn material_id_by_name(name: &str) -> Option<u8> {
         "tare" => craft_id::TARE,
         "ramen" => craft_id::RAMEN,
         "rich ramen" => craft_id::RICH_RAMEN,
+        "tea" => craft_id::TEA,
+        "thatch" => craft_id::THATCH,
         _ => return None,
     })
+}
+
+/// Display colour for any carryable id, across all three namespaces.
+///
+/// `world.gd` carries a hand-written `match` from id to `Color` for heap and
+/// stack tinting, defaulting to dirt brown. That default is why every material
+/// added since it was written — coal, fruit, grass, molten rock — piles up
+/// looking like spoil. Exposing the colour here means the table can be deleted
+/// rather than extended a tenth time, and a new material gets a look by
+/// declaring one instead of by remembering to edit GDScript.
+pub fn display_albedo(id: u8) -> [f32; 3] {
+    match id {
+        bio_id::GREEN => [0.30, 0.48, 0.24],
+        bio_id::WOOD => [0.48, 0.34, 0.20],
+        bio_id::FIBRE => [0.55, 0.48, 0.30],
+        bio_id::SEED => [0.62, 0.52, 0.28],
+        bio_id::WATER => [0.28, 0.52, 0.78],
+        bio_id::FLOWER => [0.78, 0.52, 0.68],
+        bio_id::FRUIT => [0.76, 0.34, 0.26],
+        bio_id::VEG => [0.52, 0.56, 0.24],
+        bio_id::GRASS => [0.62, 0.64, 0.32],
+        // Reads as heat, not as rock — the one carryable that should look hot.
+        bio_id::LAVA => [0.95, 0.42, 0.12],
+        craft_id::CHARCOAL => [0.14, 0.13, 0.13],
+        craft_id::CERAMIC => [0.68, 0.46, 0.36],
+        craft_id::GLASS => [0.70, 0.82, 0.84],
+        craft_id::IRON => [0.52, 0.53, 0.56],
+        craft_id::SLAG => [0.32, 0.30, 0.30],
+        craft_id::ASH => [0.72, 0.71, 0.68],
+        craft_id::LIME => [0.90, 0.89, 0.84],
+        craft_id::GRAVEL => [0.52, 0.48, 0.44],
+        craft_id::DUST => [0.60, 0.56, 0.50],
+        craft_id::SAND => [0.72, 0.62, 0.42],
+        craft_id::MANURE => [0.34, 0.26, 0.18],
+        craft_id::BONE_MEAL => [0.86, 0.84, 0.76],
+        craft_id::FLOUR => [0.92, 0.89, 0.80],
+        craft_id::OIL => [0.80, 0.68, 0.24],
+        craft_id::BROTH => [0.66, 0.44, 0.20],
+        craft_id::NOODLES => [0.88, 0.78, 0.50],
+        craft_id::TARE => [0.34, 0.22, 0.16],
+        craft_id::RAMEN => [0.82, 0.60, 0.34],
+        craft_id::RICH_RAMEN => [0.88, 0.64, 0.32],
+        craft_id::TEA => [0.58, 0.42, 0.22],
+        craft_id::THATCH => [0.74, 0.64, 0.36],
+        _ if (id as usize) < material::PALETTE.len() => material::albedo(id),
+        _ => [0.46, 0.36, 0.26],
+    }
 }
 
 pub fn bio_phys(id: u8) -> Phys {
@@ -368,6 +489,36 @@ pub fn bio_phys(id: u8) -> Phys {
         bio_id::WATER => Phys {
             bulk_kg_m3: 1000.0,
             bulking: 1.0,
+        },
+        // Foraged parts. Bulking is what makes these awkward rather than heavy:
+        // a pack fills on volume long before mass when you carry petals.
+        bio_id::FLOWER => Phys {
+            bulk_kg_m3: 180.0,
+            bulking: 1.6,
+        },
+        bio_id::FRUIT => Phys {
+            bulk_kg_m3: 700.0,
+            bulking: 1.05,
+        },
+        bio_id::VEG => Phys {
+            bulk_kg_m3: 600.0,
+            bulking: 1.1,
+        },
+        bio_id::GRASS => Phys {
+            bulk_kg_m3: 120.0,
+            bulking: 1.8,
+        },
+        bio_id::LAVA => Phys {
+            bulk_kg_m3: 2700.0,
+            bulking: 1.0,
+        },
+        craft_id::TEA => Phys {
+            bulk_kg_m3: 950.0,
+            bulking: 1.0,
+        },
+        craft_id::THATCH => Phys {
+            bulk_kg_m3: 160.0,
+            bulking: 1.5,
         },
         craft_id::CHARCOAL => Phys {
             bulk_kg_m3: 250.0,
@@ -450,16 +601,107 @@ pub fn bio_phys(id: u8) -> Phys {
 }
 
 /// Convert plant carbon pools → loose harvest mass (item 813).
+/// What is left of one organism after `taken_kg` of its woody and leaf material
+/// has already been removed by any path.
+///
+/// The forest plan requires block excavation and whole-plant felling to consume
+/// **one** ledger: chopping a trunk into blocks and then felling the remains
+/// must not pay out the intact tree a second time. Only the above-ground woody
+/// and leaf fractions are scaled down — roots and seed are not in the block
+/// grid, so chopping branches has not touched them.
+///
+/// `taken_kg` comes from `woodscape::Woodscape::taken_kg`, which is durable:
+/// a touched stand is never pruned and its ledger rides along in the save.
+pub fn harvest_plant_remaining(p: &Plant, taken_kg: f32) -> DigYield {
+    let full = harvest_plant(p);
+    let above: f32 = full
+        .parts
+        .iter()
+        .filter(|x| matches!(x.material_id, bio_id::WOOD | bio_id::GREEN))
+        .map(|x| x.mass_kg)
+        .sum();
+    if above <= 1e-4 {
+        return full;
+    }
+    let left = (1.0 - (taken_kg / above)).clamp(0.0, 1.0);
+    if left >= 0.999 {
+        return full;
+    }
+    let mut out = DigYield::default();
+    for part in &full.parts {
+        let woody = matches!(part.material_id, bio_id::WOOD | bio_id::GREEN);
+        let k = if woody { left } else { 1.0 };
+        if k <= 0.0 {
+            continue;
+        }
+        out.push(YieldPart {
+            material_id: part.material_id,
+            volume_m3: part.volume_m3 * k,
+            mass_kg: part.mass_kg * k,
+            loose_m3: part.loose_m3 * k,
+            grade: part.grade,
+        });
+    }
+    out
+}
+
+/// Above-ground woody + leaf kilograms of an intact organism — the size of the
+/// ledger entry that fully fells it.
+pub fn plant_above_ground_kg(p: &Plant) -> f32 {
+    harvest_plant(p)
+        .parts
+        .iter()
+        .filter(|x| matches!(x.material_id, bio_id::WOOD | bio_id::GREEN))
+        .map(|x| x.mass_kg)
+        .sum()
+}
+
 pub fn harvest_plant(p: &Plant) -> DigYield {
+    // Form from the genome, matching `tree_form`'s own `genome_id % 8`, so a
+    // caller that has not yet plumbed the real form still gets the right kind
+    // of produce off the right silhouette.
+    harvest_plant_as(p, (p.genome_id % 8) as u8)
+}
+
+/// What one plant gives when you take it, split by what the plant *is*.
+///
+/// The soft-tissue pool is **divided, not multiplied**: every form below hands
+/// back the same total leaf mass, apportioned differently. Foraging is meant to
+/// become a choice about where you walk, not a larger number for the same walk,
+/// and the mass-balance test downstream depends on that restraint.
+///
+/// `form` is a `tree_form` id — 0 conifer, 1 broadleaf, 2 willow, 3 scrub,
+/// 4 reed, 5 orchard/farm, 6 acacia, 7 giant.
+pub fn harvest_plant_as(p: &Plant, form: u8) -> DigYield {
     let mut y = DigYield::default();
     // Pools are dimensionless carbon; scale so a mature stand yields kilograms.
     // Timber is the mineable bulk — leaf/fibre ride along as bycatch.
     const KG: f32 = 12.0;
+    let leaf_kg = p.leaf * KG * 1.4;
+
+    // Shares of the soft-tissue pool: (greens, flowers, fruit, veg, grass).
+    // Each row sums to 1.0 — that is the invariant, and `harvest_splits_sum`
+    // asserts it rather than trusting the arithmetic to stay right by eye.
+    let (green, flower, fruit, veg, grass) = match form {
+        0 => (0.85, 0.00, 0.00, 0.00, 0.15), // conifer — needles, little else
+        1 => (0.55, 0.10, 0.25, 0.00, 0.10), // broadleaf — some fruit
+        2 => (0.70, 0.10, 0.00, 0.00, 0.20), // willow — withies, no fruit
+        3 => (0.25, 0.30, 0.05, 0.00, 0.40), // scrub — flowers and dry grass
+        4 => (0.20, 0.05, 0.00, 0.00, 0.75), // reed — essentially all grass
+        5 => (0.10, 0.10, 0.45, 0.35, 0.00), // orchard / farm — the larder
+        6 => (0.45, 0.35, 0.05, 0.00, 0.15), // acacia — heavy bloom
+        _ => (0.75, 0.05, 0.10, 0.00, 0.10), // giant and anything new
+    };
+
     let parts = [
         (bio_id::FIBRE, p.root * KG * 0.85),
-        (bio_id::GREEN, p.leaf * KG * 1.4),
         (bio_id::WOOD, p.stem * KG * 5.5),
         (bio_id::SEED, p.repro * KG * 1.2),
+        (bio_id::GREEN, leaf_kg * green),
+        (bio_id::FLOWER, leaf_kg * flower),
+        (bio_id::FRUIT, leaf_kg * fruit),
+        (bio_id::VEG, leaf_kg * veg),
+        (bio_id::GRASS, leaf_kg * grass),
     ];
     for (id, mass) in parts {
         if mass < 0.05 {
@@ -476,6 +718,33 @@ pub fn harvest_plant(p: &Plant) -> DigYield {
         });
     }
     y
+}
+
+/// The soft-tissue shares every form apportions its leaf pool by.
+/// Exposed so the invariant can be tested rather than eyeballed.
+pub fn soft_tissue_shares(form: u8) -> [f32; 5] {
+    let p = Plant {
+        leaf: 1.0 / (12.0 * 1.4),
+        root: 0.0,
+        stem: 0.0,
+        repro: 0.0,
+        ..Default::default()
+    };
+    let y = harvest_plant_as(&p, form);
+    let of = |id: u8| {
+        y.parts
+            .iter()
+            .filter(|x| x.material_id == id)
+            .map(|x| x.mass_kg)
+            .sum::<f32>()
+    };
+    [
+        of(bio_id::GREEN),
+        of(bio_id::FLOWER),
+        of(bio_id::FRUIT),
+        of(bio_id::VEG),
+        of(bio_id::GRASS),
+    ]
 }
 
 // ---------------------------------------------------------------------------
@@ -1352,6 +1621,224 @@ pub const RECIPES: &[Recipe] = &[
             mass_kg: 5.0,
         }],
     },
+    // Roots make more broth per kilogram than leaves do — the reason to
+    // keep a plot rather than forage the hedgerow.
+    Recipe {
+        id: "simmer_veg_broth",
+        station: "kitchen",
+        energy_kj: 40.0,
+        time_s: 60.0,
+        o2_kg: 0.30,
+        co2_kg: 0.40,
+        inputs: &[
+            RecipeIO {
+                material: "vegetables",
+                mass_kg: 2.5,
+            },
+            RecipeIO {
+                material: "bone meal",
+                mass_kg: 1.0,
+            },
+        ],
+        outputs: &[
+            RecipeIO {
+                material: "broth",
+                mass_kg: 3.0,
+            },
+            RecipeIO {
+                material: "gas_loss",
+                mass_kg: 0.5,
+            },
+        ],
+    },
+    // Fruit reduces further than greens: same step, better tare.
+    Recipe {
+        id: "fruit_tare",
+        station: "kitchen",
+        energy_kj: 20.0,
+        time_s: 40.0,
+        o2_kg: 0.20,
+        co2_kg: 0.25,
+        inputs: &[
+            RecipeIO {
+                material: "fruit",
+                mass_kg: 2.0,
+            },
+            RecipeIO {
+                material: "ash",
+                mass_kg: 0.3,
+            },
+        ],
+        outputs: &[
+            RecipeIO {
+                material: "tare",
+                mass_kg: 1.9,
+            },
+            RecipeIO {
+                material: "gas_loss",
+                mass_kg: 0.4,
+            },
+        ],
+    },
+    // A second route to the good bowl. `bowl_rich_ramen` wants greens,
+    // which every plant gives; this one wants what you had to grow.
+    Recipe {
+        id: "bowl_veg_ramen",
+        station: "kitchen",
+        energy_kj: 35.0,
+        time_s: 20.0,
+        o2_kg: 0.15,
+        co2_kg: 0.15,
+        inputs: &[
+            RecipeIO {
+                material: "noodles",
+                mass_kg: 1.5,
+            },
+            RecipeIO {
+                material: "broth",
+                mass_kg: 2.0,
+            },
+            RecipeIO {
+                material: "vegetables",
+                mass_kg: 0.8,
+            },
+            RecipeIO {
+                material: "oil",
+                mass_kg: 0.3,
+            },
+            RecipeIO {
+                material: "tare",
+                mass_kg: 0.4,
+            },
+        ],
+        outputs: &[RecipeIO {
+            material: "rich ramen",
+            mass_kg: 5.0,
+        }],
+    },
+    // Somewhere for a bloom to go that is not the compost heap.
+    Recipe {
+        id: "steep_tea",
+        station: "kitchen",
+        energy_kj: 12.0,
+        time_s: 45.0,
+        o2_kg: 0.00,
+        co2_kg: 0.05,
+        inputs: &[
+            RecipeIO {
+                material: "flowers",
+                mass_kg: 0.6,
+            },
+            RecipeIO {
+                material: "water",
+                mass_kg: 2.0,
+            },
+        ],
+        outputs: &[
+            RecipeIO {
+                material: "tea",
+                mass_kg: 2.4,
+            },
+            RecipeIO {
+                material: "gas_loss",
+                mass_kg: 0.2,
+            },
+        ],
+    },
+    // Grass is bulky and near-weightless, so it is the one harvest that
+    // fills a pack on volume. Bundling is what makes it carryable.
+    Recipe {
+        id: "thatch_bundle",
+        station: "mill",
+        energy_kj: 8.0,
+        time_s: 25.0,
+        o2_kg: 0.00,
+        co2_kg: 0.00,
+        inputs: &[
+            RecipeIO {
+                material: "grass",
+                mass_kg: 6.0,
+            },
+            RecipeIO {
+                material: "fibre",
+                mass_kg: 1.0,
+            },
+        ],
+        outputs: &[RecipeIO {
+            material: "thatch",
+            mass_kg: 7.0,
+        }],
+    },
+    // Dug coal beats made charcoal as a reductant — less of it, more iron,
+    // and no wood spent. It costs more atmosphere, which is the trade.
+    Recipe {
+        id: "smelt_ferrous_coal",
+        station: "smelter",
+        energy_kj: 760.0,
+        time_s: 110.0,
+        o2_kg: 9.00,
+        co2_kg: 13.00,
+        inputs: &[
+            RecipeIO {
+                material: "ferrous ore",
+                mass_kg: 20.0,
+            },
+            RecipeIO {
+                material: "coal",
+                mass_kg: 4.0,
+            },
+        ],
+        outputs: &[
+            RecipeIO {
+                material: "iron",
+                mass_kg: 8.6,
+            },
+            RecipeIO {
+                material: "slag",
+                mass_kg: 12.0,
+            },
+            RecipeIO {
+                material: "gas_loss",
+                mass_kg: 3.4,
+            },
+        ],
+    },
+    // Where molten rock comes from. Nothing in a built drum melts on its
+    // own, so the smelter is the only honest source of it.
+    Recipe {
+        id: "melt_basalt",
+        station: "smelter",
+        energy_kj: 1400.0,
+        time_s: 180.0,
+        o2_kg: 1.00,
+        co2_kg: 1.40,
+        inputs: &[RecipeIO {
+            material: "basalt",
+            mass_kg: 8.0,
+        }],
+        outputs: &[RecipeIO {
+            material: "molten rock",
+            mass_kg: 8.0,
+        }],
+    },
+    // Cools back to stone you can place. Turns ore-poor spoil into
+    // building rock instead of another heap.
+    Recipe {
+        id: "cast_basalt",
+        station: "kiln",
+        energy_kj: 30.0,
+        time_s: 240.0,
+        o2_kg: 0.00,
+        co2_kg: 0.00,
+        inputs: &[RecipeIO {
+            material: "molten rock",
+            mass_kg: 8.0,
+        }],
+        outputs: &[RecipeIO {
+            material: "basalt",
+            mass_kg: 8.0,
+        }],
+    },
 ];
 
 /// Mass in must equal mass out within tolerance (item 832).
@@ -1587,6 +2074,28 @@ mod tests {
         }
     }
 
+    /// The recipe table exists twice on disk: `sim/data/` is the copy Rust
+    /// embeds, `game/data/` is the one staged for the eventual hot-reload path.
+    /// Nothing in `game/scripts/` reads its copy yet, so a change to one and not
+    /// the other is invisible — which is exactly what happened while these
+    /// recipes were being added. Byte equality is the cheapest guard.
+    #[test]
+    fn both_recipe_copies_agree() {
+        let sim = concat!(env!("CARGO_MANIFEST_DIR"), "/data/recipes.toml");
+        let game = concat!(env!("CARGO_MANIFEST_DIR"), "/../game/data/recipes.toml");
+        let a = std::fs::read_to_string(sim).expect("sim/data/recipes.toml");
+        let b = match std::fs::read_to_string(game) {
+            Ok(b) => b,
+            // A source tarball may ship the crate without the Godot project.
+            Err(_) => return,
+        };
+        assert_eq!(
+            a, b,
+            "sim/data/recipes.toml and game/data/recipes.toml have drifted; \
+             edit one and copy it to the other"
+        );
+    }
+
     #[test]
     fn dig_half_brush_yields_less_than_full() {
         let hab = Habitat::kepler_drum();
@@ -1656,6 +2165,73 @@ mod tests {
         );
         assert!(frac < 1.0, "a 150 kg bite must not fit whole");
         assert!(inv.mass_kg() <= inv.max_mass_kg + 1e-3);
+    }
+
+    /// The forest plan's stage-1 gate: "chopping blocks and then pressing H
+    /// cannot pay out the original whole-tree biomass again."
+    #[test]
+    fn chop_then_fell_conserves_material() {
+        let mut p = Plant::default();
+        p.stem = 1.6;
+        p.leaf = 0.9;
+        p.root = 0.5;
+        p.repro = 0.2;
+        let above = plant_above_ground_kg(&p);
+        assert!(above > 1.0, "need a tree with woody mass, got {above}");
+
+        let woody = |y: &DigYield| -> f32 {
+            y.parts
+                .iter()
+                .filter(|x| matches!(x.material_id, bio_id::WOOD | bio_id::GREEN))
+                .map(|x| x.mass_kg)
+                .sum()
+        };
+
+        // Chop roughly a third of it into blocks, then fell the remains.
+        let chopped = above * 0.34;
+        let rest = harvest_plant_remaining(&p, chopped);
+        let total = chopped + woody(&rest);
+        assert!(
+            (total - above).abs() < 0.05,
+            "chop {chopped:.2} + fell {:.2} = {total:.2}, but the tree only had {above:.2}",
+            woody(&rest)
+        );
+
+        // Felling an untouched tree still pays the whole thing.
+        assert!((woody(&harvest_plant_remaining(&p, 0.0)) - above).abs() < 1e-3);
+
+        // A tree already chopped away pays no more wood, however often asked.
+        let empty = harvest_plant_remaining(&p, above);
+        assert!(woody(&empty) < 1e-3, "a stripped tree still paid wood");
+        let over = harvest_plant_remaining(&p, above * 3.0);
+        assert!(woody(&over) < 1e-3, "over-billing went negative");
+    }
+
+    /// Roots and seed are not in the block grid, so chopping branches must not
+    /// reduce them.
+    #[test]
+    fn chopping_branches_does_not_take_roots_or_seed() {
+        let mut p = Plant::default();
+        p.stem = 1.4;
+        p.leaf = 0.8;
+        p.root = 0.6;
+        p.repro = 0.3;
+        let of = |y: &DigYield, id: u8| -> f32 {
+            y.parts
+                .iter()
+                .filter(|x| x.material_id == id)
+                .map(|x| x.mass_kg)
+                .sum()
+        };
+        let full = harvest_plant(&p);
+        let half = harvest_plant_remaining(&p, plant_above_ground_kg(&p) * 0.5);
+        for id in [bio_id::FIBRE, bio_id::SEED] {
+            assert!(
+                (of(&full, id) - of(&half, id)).abs() < 1e-3,
+                "material {id} changed when only branches were chopped"
+            );
+        }
+        assert!(of(&half, bio_id::WOOD) < of(&full, bio_id::WOOD));
     }
 
     #[test]
@@ -1776,5 +2352,154 @@ mod tests {
             .map(|s| s.grade)
             .unwrap_or(0.0);
         assert!(g > 0.3, "ramen should inherit garden grade, got {g}");
+    }
+    /// A stratum nobody can find is dead code with a palette entry. Bounds,
+    /// not an exact figure: the seam is noise-driven, so pin the band it has to
+    /// stay inside — dense enough to be worth prospecting, rare enough that
+    /// coal is not simply the ground.
+    #[test]
+    fn coal_seams_are_findable_but_not_everywhere() {
+        let hab = Habitat::kepler_drum();
+        let t = Terrain::generate(hab);
+        let mut coal = 0u32;
+        let mut n = 0u32;
+        for zi in 0..32 {
+            for ti in 0..32 {
+                let theta = ti as f32 / 32.0 * std::f32::consts::TAU;
+                let z = (zi as f32 / 32.0 - 0.5) * hab.length * 0.9;
+                let surf0 = hab.radius - t.elevation0(theta, z);
+                for d in 1..24 {
+                    // r grows toward the hull, so depth below surface adds to r.
+                    let p = hab.to_world(theta, z, surf0 + d as f32 * 1.4);
+                    if crate::material::material_at(&t, p) == mid::COAL {
+                        coal += 1;
+                    }
+                    n += 1;
+                }
+            }
+        }
+        let pct = coal as f32 / n as f32 * 100.0;
+        assert!(
+            (0.5..8.0).contains(&pct),
+            "coal is {pct:.2}% of sampled rock; expected 0.5-8%"
+        );
+    }
+
+    /// The whole point of splitting `greens`: forms differ in what they give.
+    #[test]
+    fn forms_give_different_produce() {
+        let mut p = Plant::default();
+        p.leaf = 1.0;
+        p.stem = 0.0;
+        p.root = 0.0;
+        p.repro = 0.0;
+        let mass = |y: &DigYield, id: u8| {
+            y.parts
+                .iter()
+                .filter(|x| x.material_id == id)
+                .map(|x| x.mass_kg)
+                .sum::<f32>()
+        };
+        let orchard = harvest_plant_as(&p, 5);
+        let conifer = harvest_plant_as(&p, 0);
+        let reed = harvest_plant_as(&p, 4);
+        assert!(
+            mass(&orchard, bio_id::FRUIT) > 0.0,
+            "orchard must give fruit"
+        );
+        assert!(mass(&orchard, bio_id::VEG) > 0.0, "orchard must give veg");
+        assert_eq!(mass(&conifer, bio_id::FRUIT), 0.0, "a pine has no fruit");
+        assert!(
+            mass(&reed, bio_id::GRASS) > mass(&reed, bio_id::GREEN),
+            "a reed bed is mostly grass"
+        );
+    }
+
+    /// Splitting the pool must not enlarge it. If a share table stops summing
+    /// to one, foraging silently starts minting mass.
+    #[test]
+    fn harvest_splits_preserve_leaf_mass() {
+        for form in 0..8u8 {
+            let shares = soft_tissue_shares(form);
+            let total: f32 = shares.iter().sum();
+            assert!(
+                (total - 1.0).abs() < 1e-3,
+                "form {form} shares sum to {total:.4}, not 1.0"
+            );
+        }
+        // And end to end, against a plant with a real leaf pool.
+        let mut p = Plant::default();
+        p.leaf = 0.8;
+        p.stem = 0.0;
+        p.root = 0.0;
+        p.repro = 0.0;
+        let want = 0.8 * 12.0 * 1.4;
+        for form in 0..8u8 {
+            let y = harvest_plant_as(&p, form);
+            let got: f32 = y
+                .parts
+                .iter()
+                .filter(|x| {
+                    matches!(
+                        x.material_id,
+                        bio_id::GREEN
+                            | bio_id::FLOWER
+                            | bio_id::FRUIT
+                            | bio_id::VEG
+                            | bio_id::GRASS
+                    )
+                })
+                .map(|x| x.mass_kg)
+                .sum();
+            assert!(
+                (got - want).abs() < 0.2,
+                "form {form} soft tissue {got:.2} kg from a {want:.2} kg pool"
+            );
+        }
+    }
+
+    /// A material with no `Phys` row gets whatever the fallback hands back, so
+    /// a forgotten entry shows up as a stack with absurd volume rather than as
+    /// an error. Every carryable needs a name in both directions too, or a
+    /// recipe referring to it silently fails to resolve.
+    #[test]
+    fn every_new_material_has_physics_and_a_name() {
+        let carryable = [
+            bio_id::FLOWER,
+            bio_id::FRUIT,
+            bio_id::VEG,
+            bio_id::GRASS,
+            bio_id::LAVA,
+            craft_id::TEA,
+            craft_id::THATCH,
+            mid::COAL,
+        ];
+        for id in carryable {
+            let name = if id < 100 {
+                crate::material::name(id)
+            } else {
+                bio_name(id)
+            };
+            assert!(!name.is_empty() && name != "?", "id {id} has no name");
+            assert_eq!(
+                material_id_by_name(name),
+                Some(id),
+                "name {name:?} does not round-trip to id {id}"
+            );
+            let ph = if id < 100 { phys(id) } else { bio_phys(id) };
+            // A material with no colour of its own piles up looking like dirt.
+            let col = display_albedo(id);
+            assert_ne!(
+                col,
+                [0.46, 0.36, 0.26],
+                "id {id} ({name}) has no display colour"
+            );
+            assert!(
+                ph.bulk_kg_m3 > 1.0 && ph.bulking >= 1.0,
+                "id {id} ({name}) has no sensible Phys: {:?} / {:?}",
+                ph.bulk_kg_m3,
+                ph.bulking
+            );
+        }
     }
 }

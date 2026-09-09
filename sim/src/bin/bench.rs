@@ -17,8 +17,12 @@ mod economy;
 mod edits;
 #[path = "../erosion.rs"]
 mod erosion;
+#[path = "../far_field.rs"]
+mod far_field;
 #[path = "../flow.rs"]
 mod flow;
+#[path = "../forest.rs"]
+mod forest;
 #[path = "../habitat.rs"]
 mod habitat;
 #[path = "../lakes.rs"]
@@ -43,6 +47,8 @@ mod soil;
 mod sph;
 #[path = "../terrain.rs"]
 mod terrain;
+#[path = "../tree_form.rs"]
+mod tree_form;
 #[path = "../trophic.rs"]
 mod trophic;
 #[path = "../weather.rs"]
@@ -96,72 +102,79 @@ fn main() {
 
     // One near chunk — the real path the game runs, not an approximation of it.
     // This is the single most expensive thing that can land on a frame.
-    let samples = [(0i64, 0i64), (11, 3), (37, -8), (64, 21), (91, -30), (120, 47)];
+    let samples = [
+        (0i64, 0i64),
+        (11, 3),
+        (37, -8),
+        (64, 21),
+        (91, -30),
+        (120, 47),
+    ];
     let workers = chunker::worker_count();
     let bio = biosphere::Biosphere::new(&ter);
     for &nw in &[1usize, workers] {
-    let (mut worst, mut total) = (std::time::Duration::ZERO, std::time::Duration::ZERO);
-    let (mut mesh_t, mut paint_t, mut shade_t) = (
-        std::time::Duration::ZERO,
-        std::time::Duration::ZERO,
-        std::time::Duration::ZERO,
-    );
-    let (mut vsum, mut tsum) = (0usize, 0usize);
-    for (ci, cj) in samples {
-        let t3 = Instant::now();
-        let mut m = chunker::chunk_mesh(&ter, ci, cj, nw);
-        let a = t3.elapsed();
-        let t4 = Instant::now();
-        let (th_c, z_c) = chunker::chunk_centre(&ter, ci, cj);
-        m.cols = vec![[0.0f32; 3]; m.verts.len()];
-        let run = |out: &mut [[f32; 3]], from: usize| {
-            let mut win = paint::BiomeWindow::new(ter.hab.radius, th_c, z_c, 46.0);
-            for (i, c) in out.iter_mut().enumerate() {
-                *c = paint::vertex_color(
-                    &ter,
-                    Some(&bio),
-                    Some(&mut win),
-                    m.verts[from + i],
-                    m.normals[from + i],
-                );
-            }
-        };
-        if nw > 1 {
-            let per = m.verts.len().div_ceil(nw);
-            std::thread::scope(|sc| {
-                for (w, block) in m.cols.chunks_mut(per).enumerate() {
-                    let run = &run;
-                    sc.spawn(move || run(block, w * per));
+        let (mut worst, mut total) = (std::time::Duration::ZERO, std::time::Duration::ZERO);
+        let (mut mesh_t, mut paint_t, mut shade_t) = (
+            std::time::Duration::ZERO,
+            std::time::Duration::ZERO,
+            std::time::Duration::ZERO,
+        );
+        let (mut vsum, mut tsum) = (0usize, 0usize);
+        for (ci, cj) in samples {
+            let t3 = Instant::now();
+            let mut m = chunker::chunk_mesh(&ter, ci, cj, nw);
+            let a = t3.elapsed();
+            let t4 = Instant::now();
+            let (th_c, z_c) = chunker::chunk_centre(&ter, ci, cj);
+            m.cols = vec![[0.0f32; 3]; m.verts.len()];
+            let run = |out: &mut [[f32; 3]], from: usize| {
+                let mut win = paint::BiomeWindow::new(ter.hab.radius, th_c, z_c, 46.0);
+                for (i, c) in out.iter_mut().enumerate() {
+                    *c = paint::vertex_color(
+                        &ter,
+                        Some(&bio),
+                        Some(&mut win),
+                        m.verts[from + i],
+                        m.normals[from + i],
+                    );
                 }
-            });
-        } else {
-            run(&mut m.cols, 0);
+            };
+            if nw > 1 {
+                let per = m.verts.len().div_ceil(nw);
+                std::thread::scope(|sc| {
+                    for (w, block) in m.cols.chunks_mut(per).enumerate() {
+                        let run = &run;
+                        sc.spawn(move || run(block, w * per));
+                    }
+                });
+            } else {
+                run(&mut m.cols, 0);
+            }
+            let b = t4.elapsed();
+            let t5 = Instant::now();
+            let m = mesher::flat_shade(m);
+            let c = t5.elapsed();
+            let dt = a + b + c;
+            mesh_t += a;
+            paint_t += b;
+            shade_t += c;
+            worst = worst.max(dt);
+            total += dt;
+            vsum += m.verts.len();
+            tsum += m.indices.len() / 3;
         }
-        let b = t4.elapsed();
-        let t5 = Instant::now();
-        let m = mesher::flat_shade(m);
-        let c = t5.elapsed();
-        let dt = a + b + c;
-        mesh_t += a;
-        paint_t += b;
-        shade_t += c;
-        worst = worst.max(dt);
-        total += dt;
-        vsum += m.verts.len();
-        tsum += m.indices.len() / 3;
-    }
-    let k = samples.len() as u32;
-    println!(
-        "CHUNK x{} ({} worker{}): mean {:?}, worst {:?} -> {} verts, {} tris",
-        samples.len(),
-        nw,
-        if nw == 1 { "" } else { "s" },
-        total / k,
-        worst,
-        vsum,
-        tsum
-    );
-    println!(
+        let k = samples.len() as u32;
+        println!(
+            "CHUNK x{} ({} worker{}): mean {:?}, worst {:?} -> {} verts, {} tris",
+            samples.len(),
+            nw,
+            if nw == 1 { "" } else { "s" },
+            total / k,
+            worst,
+            vsum,
+            tsum
+        );
+        println!(
         "  mesh {:?} + paint {:?} + flat-shade {:?} per chunk · worst is {:.0}% of a 16.7 ms frame",
         mesh_t / k,
         paint_t / k,
@@ -182,10 +195,18 @@ fn main() {
             let t = Instant::now();
             let v = std::hint::black_box(f());
             let _ = v;
-            println!("  {:>18}: {:>7.0} ns/vertex", name, t.elapsed().as_secs_f64() / 20_000.0 * 1e9);
+            println!(
+                "  {:>18}: {:>7.0} ns/vertex",
+                name,
+                t.elapsed().as_secs_f64() / 20_000.0 * 1e9
+            );
         };
         println!("paint breakdown (20k surface points):");
-        piece("material_at", &|| pts.iter().map(|p| material::material_at(&ter, *p) as f32).sum());
+        piece("material_at", &|| {
+            pts.iter()
+                .map(|p| material::material_at(&ter, *p) as f32)
+                .sum()
+        });
         piece("biome_at", &|| {
             pts.iter()
                 .map(|p| {
@@ -310,5 +331,19 @@ fn main() {
             None,
         );
         println!("river segments: {} ({} floats)", segs.len() / 7, segs.len());
+
+        bench_forest(&ter);
+    }
+
+    /// Stage 0 forest baseline: population shape and the cost of measuring it.
+    fn bench_forest(ter: &terrain::Terrain) {
+        let t1 = Instant::now();
+        let bio = biosphere::Biosphere::new(ter);
+        let bio_ms = t1.elapsed().as_secs_f64() * 1000.0;
+        let t2 = Instant::now();
+        let st = forest::stats(&bio.plants, &ter.hab);
+        let stat_ms = t2.elapsed().as_secs_f64() * 1000.0;
+        println!("forest: biosphere {bio_ms:.0} ms | stats {stat_ms:.1} ms");
+        println!("forest: {}", forest::summary(&st));
     }
 }

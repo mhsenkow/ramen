@@ -20,9 +20,17 @@ otherwise adds dirt · **H** fell nearest plant · **L** take spoil/timber heap
 **C** brush shape (sphere / levelling) · **Z** undo
 **Q/E** or two-finger side-scroll: brush size · **scroll**: camera zoom
 **1-4** module · **B** drop a waypoint · **+/-** plan-view zoom
+**I** field book — every readout on one tabbed page, big enough to read
+**O** whole-ship map: unrolled ↔ 3D drum · **,** / **.** map size
+(←/→ tab · home/end first/last · ↑/↓ scroll · **I** again to close)
 **T** throw (Coriolis) · **P** tilt-shift · **TAB** switch view
 **F2/F3** cycle your build · **Esc → Build** the full character creator
 **Esc** menu — rebind any key, look sensitivity, FOV, invert Y, reduced motion, HUD density
+
+**Live co-op:** Esc → **Invite friend** opens a lobby that checks for
+[Tailscale](https://tailscale.com/download) (needed for different cities), then
+**Host** → invite auto-copies → friend **Joins**. Same Wi‑Fi works without Tailscale.
+Voice on Discord.
 
 Gamepad works throughout: left stick moves, right stick looks, triggers
 excavate and install, shoulders size the brush, D-pad handles waypoints and
@@ -43,6 +51,9 @@ python3 tools/check_shader_includes.py
 python3 tools/check_shader_literals.py
 python3 tools/check_multimesh_init.py
 python3 tools/check_ui_contrast.py
+python3 tools/check_godot.py            # every script/shader/scene loads headless
+python3 tools/check_godot.py --verify   # prove that gate still catches breakage
+cd sim && cargo check --all-targets     # compiles bin/bench too, which tests skip
 ```
 
 Kepler Drum is **900 m radius x 6000 m long** — 5.65 km around, ~9 minutes to

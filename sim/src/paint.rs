@@ -291,7 +291,7 @@ pub fn vertex_color(
         let band = ((below * 0.08).sin() * 0.5 + 0.5) as f32;
         let k = (1.0 - (below / 70.0).clamp(0.0, 0.55)) as f32;
         let shade = 0.85 + 0.15 * band;
-            return [alb[0] * k * shade, alb[1] * k * shade, alb[2] * k * shade];
+        return [alb[0] * k * shade, alb[1] * k * shade, alb[2] * k * shade];
     }
 
     let up = t.hab.up_at(p);
@@ -343,7 +343,9 @@ pub fn vertex_color(
                 }
             }
             // Salt crust sparkle on arid flats with tiny flux.
-            if matches!(bid, crate::biome::id::DESERT | crate::biome::id::DUNE) && flux < 0.12 && slope < 0.25
+            if matches!(bid, crate::biome::id::DESERT | crate::biome::id::DUNE)
+                && flux < 0.12
+                && slope < 0.25
             {
                 let salt = [0.78, 0.76, 0.68];
                 for i in 0..3 {
@@ -405,7 +407,8 @@ pub fn vertex_color(
             let road = [0.28, 0.28, 0.30];
             let edge_th = (theta * t.hab.radius).rem_euclid(block);
             let edge_z = z.rem_euclid(block);
-            let on_road = edge_th < 4.5 || edge_z < 4.5 || edge_th > block - 4.5 || edge_z > block - 4.5;
+            let on_road =
+                edge_th < 4.5 || edge_z < 4.5 || edge_th > block - 4.5 || edge_z > block - 4.5;
             let target = if on_road { road } else { lot };
             let mix = (0.50 + 0.50 * city_w).min(0.92);
             for i in 0..3 {
@@ -462,7 +465,8 @@ pub fn vertex_color(
             let block = 90.0;
             let edge_th = (theta * t.hab.radius).rem_euclid(block);
             let edge_z = z.rem_euclid(block);
-            let on_road = edge_th < 4.5 || edge_z < 4.5 || edge_th > block - 4.5 || edge_z > block - 4.5;
+            let on_road =
+                edge_th < 4.5 || edge_z < 4.5 || edge_th > block - 4.5 || edge_z > block - 4.5;
             let target = if on_road {
                 [0.28, 0.28, 0.30]
             } else {

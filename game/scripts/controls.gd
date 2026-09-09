@@ -23,6 +23,11 @@ const ACTIONS := [
 	{"id": "map_in",    "label": "Plan zoom in",   "key": KEY_EQUAL,  "btn": JOY_BUTTON_DPAD_RIGHT},
 	{"id": "map_out",   "label": "Plan zoom out",  "key": KEY_MINUS,  "btn": JOY_BUTTON_DPAD_LEFT},
 	{"id": "view",      "label": "Switch view",    "key": KEY_TAB,    "btn": JOY_BUTTON_RIGHT_STICK},
+	# No gamepad button left free; rebindable from the menu like any other.
+	{"id": "info",      "label": "Field book",     "key": KEY_I},
+	{"id": "map_mode",  "label": "Map: 3D / flat", "key": KEY_O},
+	{"id": "map_small", "label": "Maps smaller",   "key": KEY_COMMA},
+	{"id": "map_big",   "label": "Maps larger",    "key": KEY_PERIOD},
 	{"id": "throw",     "label": "Throw object",   "key": KEY_T,      "btn": JOY_BUTTON_DPAD_DOWN},
 	{"id": "harvest",   "label": "Fell tree",      "key": KEY_H,      "btn": JOY_BUTTON_MISC1},
 	{"id": "drop",      "label": "Drop pack",      "key": KEY_X,      "btn": JOY_BUTTON_BACK},
