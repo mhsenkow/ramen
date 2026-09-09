@@ -142,13 +142,34 @@ pub struct Woodscape {
 /// Kilograms per block. One place, because the dig path bills blocks and the
 /// fell path bills what is left of the organism — they have to agree on a rate.
 /// Material that came down because nothing was holding it up any more.
-#[derive(Clone, Copy, Debug)]
+///
+/// The voxel list is the severed piece's shape — it falls as one rigid body
+/// that still *looks* like the limb / wall you cut free, rather than dissolving
+/// into abstract log capsules.
+#[derive(Clone, Debug)]
 pub struct Fall {
     pub wood_kg: f32,
     pub leaf_kg: f32,
     pub blocks: u32,
-    /// Foot of the tree it fell from — where the pile ends up.
+    /// Foot of the tree it fell from — cut / stump reference.
     pub at: [f32; 3],
+    /// Centroid of the fallen cells (world space).
+    pub centroid: [f32; 3],
+    /// Principal axis of the fallen set (unit-ish world vector).
+    pub axis: [f32; 3],
+    /// Extent along that axis, metres.
+    pub extent: f32,
+    /// Cell centres relative to `centroid`, plus kind (WOOD/LEAF).
+    pub voxels: Vec<FallVoxel>,
+}
+
+/// One block of a falling piece, in metres from the piece's centroid.
+#[derive(Clone, Copy, Debug)]
+pub struct FallVoxel {
+    pub lx: f32,
+    pub ly: f32,
+    pub lz: f32,
+    pub kind: u8,
 }
 
 /// What came of asking for a stand.
@@ -227,7 +248,7 @@ fn neighbors6(k: Key) -> [Key; 6] {
 /// through a corner. Under face adjacency a forest nobody had touched would
 /// shed a fifth of itself on the first tick. Corner contact is what this
 /// geometry means by joined.
-fn neighbors26(k: Key) -> Vec<Key> {
+pub(crate) fn neighbors26(k: Key) -> Vec<Key> {
     let mut out = Vec::with_capacity(26);
     for dx in -1..=1 {
         for dy in -1..=1 {
@@ -334,6 +355,12 @@ impl Woodscape {
         self.chunks.get(&chunk_of(k)).and_then(|c| c.get(&k))
     }
 
+    /// Public read of a cell — pyro ignition needs plant id without raw remove.
+    #[inline]
+    pub(crate) fn cell_public(&self, k: Key) -> Option<Cell> {
+        self.cell(k).copied()
+    }
+
     /// Place a cell. Same-kind neighbours already "combine" — one grid, shared
     /// faces. Wood placed against foreign wood grafts (adopts its plant id).
     pub fn set(&mut self, k: Key, cell_kind: u8, plant: u32) -> bool {
@@ -388,6 +415,27 @@ impl Woodscape {
             }
         }
         changed
+    }
+
+    /// Burn one fuel cell: remove it, bill `taken`, queue leaf checks.
+    /// Do not expose raw `remove` to pyro — a burned cell must hit the ledger.
+    pub(crate) fn burn_cell(&mut self, k: Key) -> Option<(u8, u32, f32)> {
+        let cell = self.cell(k).copied()?;
+        if cell.kind != kind::WOOD && cell.kind != kind::LEAF {
+            return None;
+        }
+        let kg = if cell.kind == kind::WOOD {
+            WOOD_KG
+        } else {
+            LEAF_KG
+        };
+        if !self.remove(k) {
+            return None;
+        }
+        if cell.plant != u32::MAX {
+            *self.taken.entry(cell.plant).or_insert(0.0) += kg;
+        }
+        Some((cell.kind, cell.plant, kg))
     }
 
     /// Remove one cell, keeping counts, the chunk map and the dirty-leaf queue
@@ -714,28 +762,165 @@ impl Woodscape {
             }
         }
 
-        let fall: Vec<Key> = own
+        let fall_wood: Vec<Key> = own
             .iter()
             .filter(|(k, kd)| **kd == kind::WOOD && !held.contains_key(*k))
             .map(|(k, _)| *k)
             .collect();
-        if fall.is_empty() {
+        if fall_wood.is_empty() {
             return None;
         }
 
-        for k in &fall {
+        // Leaves that only hung on the falling wood come with it — otherwise
+        // the crown floats in mid-air until decay_leaves catches up.
+        let mut fall_set: FastSet<Key> = FastSet::default();
+        for k in &fall_wood {
+            fall_set.insert(*k);
+        }
+        let mut fall_leaf: Vec<Key> = Vec::new();
+        for (k, kd) in &own {
+            if *kd != kind::LEAF || fall_set.contains(k) {
+                continue;
+            }
+            let mut on_fall = false;
+            let mut on_held = false;
+            for n in neighbors26(*k) {
+                if fall_set.contains(&n) {
+                    on_fall = true;
+                }
+                if held.contains_key(&n) {
+                    on_held = true;
+                }
+            }
+            // Also grab leaves that only reach held wood through other falling
+            // leaves — anything whose nearest wood is in the falling set.
+            if on_fall && !on_held {
+                fall_leaf.push(*k);
+            } else if on_fall && !Self::wood_within_set(*k, 5, &held) {
+                fall_leaf.push(*k);
+            }
+        }
+        for k in &fall_leaf {
+            fall_set.insert(*k);
+        }
+
+        let mut all: Vec<(Key, u8)> = fall_wood
+            .iter()
+            .map(|k| (*k, kind::WOOD))
+            .chain(fall_leaf.iter().map(|k| (*k, kind::LEAF)))
+            .collect();
+        if all.is_empty() {
+            return None;
+        }
+
+        // Shape of the fallen set — one pass over cells we already collected.
+        let mut centroid = [0.0f32; 3];
+        for (k, _) in &all {
+            let p = dequantize(*k);
+            centroid[0] += p[0];
+            centroid[1] += p[1];
+            centroid[2] += p[2];
+        }
+        let n = all.len() as f32;
+        centroid[0] /= n;
+        centroid[1] /= n;
+        centroid[2] /= n;
+        // Power-iteration principal axis of the covariance (wood only weighs it).
+        let mut axis = [
+            origin[0] - centroid[0],
+            origin[1] - centroid[1],
+            origin[2] - centroid[2],
+        ];
+        if axis[0] * axis[0] + axis[1] * axis[1] + axis[2] * axis[2] < 1e-4 {
+            axis = [up[0], up[1], up[2]];
+        }
+        for _ in 0..6 {
+            let mut acc = [0.0f32; 3];
+            for (k, kd) in &all {
+                if *kd != kind::WOOD {
+                    continue;
+                }
+                let p = dequantize(*k);
+                let d = [p[0] - centroid[0], p[1] - centroid[1], p[2] - centroid[2]];
+                let dot = d[0] * axis[0] + d[1] * axis[1] + d[2] * axis[2];
+                acc[0] += d[0] * dot;
+                acc[1] += d[1] * dot;
+                acc[2] += d[2] * dot;
+            }
+            let len = (acc[0] * acc[0] + acc[1] * acc[1] + acc[2] * acc[2]).sqrt();
+            if len < 1e-6 {
+                break;
+            }
+            axis = [acc[0] / len, acc[1] / len, acc[2] / len];
+        }
+        let mut emin = 0.0f32;
+        let mut emax = 0.0f32;
+        for (k, _) in &all {
+            let p = dequantize(*k);
+            let d = [p[0] - centroid[0], p[1] - centroid[1], p[2] - centroid[2]];
+            let t = d[0] * axis[0] + d[1] * axis[1] + d[2] * axis[2];
+            emin = emin.min(t);
+            emax = emax.max(t);
+        }
+        let extent = (emax - emin).max(CELL);
+
+        // Cap stored voxels for the renderer; mass still counts every block.
+        const MAX_SHAPE: usize = 900;
+        if all.len() > MAX_SHAPE {
+            // Keep a spatial subsample so the silhouette still reads.
+            let step = (all.len() / MAX_SHAPE).max(1);
+            all = all.into_iter().enumerate().filter(|(i, _)| i % step == 0).map(|(_, v)| v).collect();
+        }
+        let voxels: Vec<FallVoxel> = all
+            .iter()
+            .map(|(k, kd)| {
+                let p = dequantize(*k);
+                FallVoxel {
+                    lx: p[0] - centroid[0],
+                    ly: p[1] - centroid[1],
+                    lz: p[2] - centroid[2],
+                    kind: *kd,
+                }
+            })
+            .collect();
+
+        let wood_n = fall_wood.len();
+        let leaf_n = fall_leaf.len();
+        for k in &fall_wood {
             *self.taken.entry(pid).or_insert(0.0) += WOOD_KG;
-            // `remove` queues the neighbouring leaves, so the crown crumbles
-            // over the next few ticks instead of all at once.
+            self.remove(*k);
+        }
+        for k in &fall_leaf {
+            *self.taken.entry(pid).or_insert(0.0) += LEAF_KG;
             self.remove(*k);
         }
         self.edited.insert(pid);
         Some(Fall {
-            wood_kg: fall.len() as f32 * WOOD_KG,
-            leaf_kg: 0.0,
-            blocks: fall.len() as u32,
+            wood_kg: wood_n as f32 * WOOD_KG,
+            leaf_kg: leaf_n as f32 * LEAF_KG,
+            blocks: (wood_n + leaf_n) as u32,
             at: origin,
+            centroid,
+            axis,
+            extent,
+            voxels,
         })
+    }
+
+    /// Is any key of `set` within Manhattan `manhattan` of `k`?
+    fn wood_within_set(k: Key, manhattan: i32, set: &FastMap<Key, ()>) -> bool {
+        for dx in -manhattan..=manhattan {
+            let rx = manhattan - dx.abs();
+            for dy in -rx..=rx {
+                let rz = rx - dy.abs();
+                for dz in -rz..=rz {
+                    if set.contains_key(&(k.0 + dx, k.1 + dy, k.2 + dz)) {
+                        return true;
+                    }
+                }
+            }
+        }
+        false
     }
 
     /// Chunk keys that can hold any cell of one stand.
@@ -974,7 +1159,7 @@ impl Woodscape {
         n
     }
 
-    fn wood_within(&self, k: Key, manhattan: i32) -> bool {
+    pub(crate) fn wood_within(&self, k: Key, manhattan: i32) -> bool {
         for dx in -manhattan..=manhattan {
             let rx = manhattan - dx.abs();
             for dy in -rx..=rx {
@@ -2112,14 +2297,18 @@ mod bite {
         let (cut, _) = cut_band(&mut w, pid, up, 12.0, 14.0);
         let fell = w.collapse_severed(pid, up).expect("it should fall");
         let billed = w.taken_kg(pid);
-        let accounted = cut + fell.wood_kg;
+        // Leaves that hung on the severed wood come down with it and bill
+        // LEAF_KG — cut_band only takes wood, so the ledger is cut + wood + leaf.
+        let accounted = cut + fell.wood_kg + fell.leaf_kg;
         // Relative, not absolute: this is 33 tonnes accumulated as ~12,000
         // f32 additions of 2.8, and the ledger adds them in a different order
         // from the test. At that magnitude f32 steps are ~0.002 kg, so the two
         // sums differ by a few kg without a single kilogram going astray.
         assert!(
             (billed - accounted).abs() < accounted * 5e-4,
-            "ledger says {billed:.1} kg, cut plus fall is {accounted:.1} kg"
+            "ledger says {billed:.1} kg, cut plus fall is {accounted:.1} kg (wood {:.1} + leaf {:.1})",
+            fell.wood_kg,
+            fell.leaf_kg
         );
     }
 

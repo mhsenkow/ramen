@@ -12,6 +12,7 @@ mod biome;
 mod biosphere;
 mod chronicle;
 mod chunker;
+mod debris;
 mod dwelling;
 mod economy;
 mod edits;
@@ -29,6 +30,7 @@ mod paint;
 mod persist;
 mod plant;
 mod province;
+mod pyro;
 mod soil;
 mod sph;
 mod terrain;
@@ -531,7 +533,12 @@ impl RamaTerrain {
                 .map(|q| q.mass_kg)
                 .sum();
             if ice > 0.0 {
-                let temp = bio.weather.temp_at_elev(theta, z, ter.elevation(theta, z));
+                let elev = ter.elevation(theta, z);
+                let temp = bio.weather.temp_at_elev(theta, z, elev)
+                    + bio
+                        .pyro
+                        .heat
+                        .excess_at(ter.hab.radius, ter.hab.length, theta, z);
                 let f = economy::ice_melt_fraction(temp);
                 if f > 0.0 {
                     melt_kg = ice * f;
@@ -596,37 +603,22 @@ impl RamaTerrain {
                     .harvest_sphere([p.x, p.y, p.z], radius as f32 * 1.15)
             };
             voxel_blocks = n;
-            // Anything the cut left unsupported comes down now. It lands as a
-            // pile at the foot of the tree rather than in the pack: a crown
-            // that fell is on the ground, and it can be tonnes of timber.
+            // Anything the cut left unsupported comes down now as tumbling
+            // logs — not a silent heap at the stump.
             for pid in bio.woodscape.cut_plants() {
                 let up = hab.up_at([p.x, p.y, p.z]);
                 let Some(f) = bio.woodscape.collapse_severed(pid, up) else {
                     continue;
                 };
-                let (fth, fz, _) = hab.to_cyl(f.at);
                 felled_blocks += f.blocks;
-                for (id, kg, grade) in [
-                    (economy::bio_id::WOOD, f.wood_kg, 0.7f32),
-                    (economy::bio_id::GREEN, f.leaf_kg, 0.5f32),
-                ] {
-                    if kg <= 0.05 {
-                        continue;
-                    }
-                    let ph = economy::bio_phys(id);
-                    let vol = kg / ph.bulk_kg_m3.max(1.0);
-                    economy::deposit_heap(
-                        &mut self.heaps,
-                        hab.radius,
-                        fth,
-                        fz,
-                        id,
-                        kg,
-                        vol * ph.bulking,
-                        grade,
-                    );
-                    felled_kg += kg;
-                }
+                felled_kg += f.wood_kg + f.leaf_kg;
+                bio.debris.spawn_from_fall(
+                    &hab,
+                    &f,
+                    self.player_theta,
+                    self.player_z,
+                    &mut self.heaps,
+                );
             }
             for (id, kg, grade) in [
                 (economy::bio_id::WOOD, wkg, 0.7f32),
@@ -789,10 +781,7 @@ impl RamaTerrain {
     fn mine_trees_at(&mut self, theta: f32, z: f32, radius: f32) -> (economy::DigYield, u32) {
         let mut out = economy::DigYield::default();
         let mut n = 0u32;
-        let (hab_r, hab_len) = {
-            let t = self.ter();
-            (t.hab.radius, t.hab.length)
-        };
+        let hab = self.ter().hab;
         let Some(bio) = self.bio.as_mut() else {
             return (out, 0);
         };
@@ -805,7 +794,7 @@ impl RamaTerrain {
             let dth = {
                 let x = (p.theta - theta).rem_euclid(std::f32::consts::TAU);
                 let x = x.min(std::f32::consts::TAU - x);
-                x * hab_r
+                x * hab.radius
             };
             let dz = p.z - z;
             let dist = (dth * dth + dz * dz).sqrt();
@@ -814,31 +803,66 @@ impl RamaTerrain {
                 hit.push((dist, i));
             }
         }
-        // Cap one dig bite — clear-felling a whole stand takes repeated swings.
         hit.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
         const MAX_PER_BITE: usize = 2;
+        let player_th = self.player_theta;
+        let player_z = self.player_z;
+        let mut log_spawns: Vec<(f32, f32, f32)> = Vec::new(); // th, z, kg
         for &(_, i) in hit.iter().take(MAX_PER_BITE) {
             let pid = i as u32;
-            // One ledger for every removal path. Chopping the trunk into blocks
-            // has already paid out that material, so felling the remains pays
-            // only the remainder — and then records the whole organism as taken
-            // so nothing can bill it a third time.
             let taken = bio.woodscape.taken_kg(pid);
             let mut y = economy::harvest_plant_remaining(&bio.plants.plants[i], taken);
             let above = economy::plant_above_ground_kg(&bio.plants.plants[i]);
             bio.woodscape.add_taken(pid, (above - taken).max(0.0));
+            let pth = bio.plants.plants[i].theta;
+            let pz = bio.plants.plants[i].z;
             bio.plants.plants[i].alive = false;
-            // The stand's blocks go with it. Leaving them stamped left a whole
-            // canopy floating over the stump, and the wood in it would have
-            // been billed a second time by the next dig bite through the gap.
             bio.woodscape.remove_plant(pid);
-            let npp = bio.trophic.npp_at(theta, z, hab_len);
+            let npp = bio.trophic.npp_at(theta, z, hab.length);
             let grade = (npp / 1800.0).clamp(0.15, 1.0);
             for part in &mut y.parts {
                 part.grade = grade;
             }
+            let wood_kg: f32 = y
+                .parts
+                .iter()
+                .filter(|p| p.material_id == economy::bio_id::WOOD)
+                .map(|p| p.mass_kg)
+                .sum();
+            let log_kg = (wood_kg * 0.4).min(wood_kg);
+            if log_kg > 1.0 {
+                let remain = (wood_kg - log_kg) / wood_kg.max(1e-3);
+                for part in &mut y.parts {
+                    if part.material_id == economy::bio_id::WOOD {
+                        part.mass_kg *= remain;
+                        part.volume_m3 *= remain;
+                        part.loose_m3 *= remain;
+                    }
+                }
+                y.retotal();
+                log_spawns.push((pth, pz, log_kg));
+            }
             out.append(&y);
             n += 1;
+        }
+        // Spawn after the plant loop so we can also read terrain elevation.
+        let elevs: Vec<f32> = log_spawns
+            .iter()
+            .map(|(th, zz, _)| self.ter().elevation(*th, *zz))
+            .collect();
+        if let Some(bio) = self.bio.as_mut() {
+            for (j, (pth, pz, log_kg)) in log_spawns.into_iter().enumerate() {
+                bio.debris.spawn_fell_trunk(
+                    &hab,
+                    pth,
+                    pz,
+                    elevs[j],
+                    log_kg,
+                    player_th,
+                    player_z,
+                    &mut self.heaps,
+                );
+            }
         }
         (out, n)
     }
@@ -1820,6 +1844,76 @@ impl RamaTerrain {
     }
 
     #[func]
+    fn agent_blurb(&self, index: i64) -> GString {
+        let Some(bio) = self.bio.as_ref() else {
+            return GString::from("");
+        };
+        bio.agents
+            .agents
+            .get(index as usize)
+            .map(|a| GString::from(a.blurb))
+            .unwrap_or_else(|| GString::from(""))
+    }
+
+    #[func]
+    fn agent_romanceable(&self, index: i64) -> bool {
+        let Some(bio) = self.bio.as_ref() else {
+            return false;
+        };
+        bio.agents
+            .agents
+            .get(index as usize)
+            .map(|a| a.romanceable)
+            .unwrap_or(false)
+    }
+
+    #[func]
+    fn agent_vocation(&self, index: i64) -> GString {
+        let Some(bio) = self.bio.as_ref() else {
+            return GString::from("");
+        };
+        bio.agents
+            .agents
+            .get(index as usize)
+            .map(|a| GString::from(a.vocation.as_str()))
+            .unwrap_or_else(|| GString::from(""))
+    }
+
+    /// Cast vocation modules: [theta, z, kind, lift_m, agent_id, ...]
+    #[func]
+    fn cast_modules_lod(&self) -> PackedFloat32Array {
+        let mut out = Vec::new();
+        let Some(bio) = self.bio.as_ref() else {
+            return PackedFloat32Array::from(out.as_slice());
+        };
+        for m in &bio.agents.cast_modules {
+            out.extend_from_slice(&[
+                m.theta,
+                m.z,
+                m.kind as f32,
+                m.lift_m,
+                m.agent_id as f32,
+            ]);
+        }
+        PackedFloat32Array::from(out.as_slice())
+    }
+
+    /// Romanceable plot seats for the drum map: [theta, z, id, ...]
+    #[func]
+    fn cast_plots_lod(&self) -> PackedFloat32Array {
+        let mut out = Vec::new();
+        let Some(bio) = self.bio.as_ref() else {
+            return PackedFloat32Array::from(out.as_slice());
+        };
+        for a in &bio.agents.agents {
+            if a.alive && a.romanceable {
+                out.extend_from_slice(&[a.plot_theta, a.plot_z, a.id as f32]);
+            }
+        }
+        PackedFloat32Array::from(out.as_slice())
+    }
+
+    #[func]
     fn agent_name(&self, index: i64) -> GString {
         let Some(bio) = self.bio.as_ref() else {
             return GString::from("");
@@ -2582,6 +2676,216 @@ impl RamaTerrain {
         let _ = out.insert("blocks", bio.woodscape.len() as i64);
         out
     }
+
+    /// Debris bodies near the camera. Stride 11:
+    /// [x,y,z, ax,ay,az, spin, length, girth, material, heat01]
+    #[func]
+    fn debris_lod(
+        &self,
+        x: f64,
+        y: f64,
+        z: f64,
+        radius: f64,
+        limit: i64,
+    ) -> PackedFloat32Array {
+        let (Some(bio), Some(ter)) = (self.bio.as_ref(), self.t.as_ref()) else {
+            return PackedFloat32Array::from([].as_slice());
+        };
+        PackedFloat32Array::from(
+            bio.debris
+                .lod_near(
+                    &ter.hab,
+                    [x as f32, y as f32, z as f32],
+                    (radius as f32).max(8.0),
+                    limit.max(1) as usize,
+                )
+                .as_slice(),
+        )
+    }
+
+    /// Drain debris impact/splash/beach events. Call every frame.
+    #[func]
+    fn debris_events(&mut self) -> VariantArray {
+        let mut arr = VariantArray::new();
+        let Some(bio) = self.bio.as_mut() else {
+            return arr;
+        };
+        for ev in bio.debris.drain_events() {
+            let mut d = Dictionary::new();
+            let kind = match ev.kind {
+                debris::event_kind::SPLASH => "splash",
+                debris::event_kind::BEACH => "beach",
+                _ => "impact",
+            };
+            let _ = d.insert("kind", kind);
+            let _ = d.insert("x", ev.x as f64);
+            let _ = d.insert("y", ev.y as f64);
+            let _ = d.insert("z", ev.z as f64);
+            let _ = d.insert("energy", ev.energy as f64);
+            let _ = arr.push(&d.to_variant());
+        }
+        arr
+    }
+
+    /// Frame-rate debris integration, independent of the biosphere tick.
+    #[func]
+    fn debris_step(&mut self, dt_seconds: f64) {
+        let player_th = self.player_theta;
+        let player_z = self.player_z;
+        let (Some(bio), Some(ter)) = (self.bio.as_mut(), self.t.as_ref()) else {
+            return;
+        };
+        // Clone depth so we can mutably borrow debris/heaps without fighting water.
+        let depth = bio.water.depth.clone();
+        bio.debris.step(
+            ter,
+            &depth,
+            &mut self.heaps,
+            dt_seconds as f32,
+            player_th,
+            player_z,
+        );
+    }
+
+    /// Fire embers near the camera. Stride 5: [x,y,z, temp01, size]
+    #[func]
+    fn fire_lod(
+        &self,
+        x: f64,
+        y: f64,
+        z: f64,
+        radius: f64,
+        limit: i64,
+    ) -> PackedFloat32Array {
+        let (Some(bio), Some(ter)) = (self.bio.as_ref(), self.t.as_ref()) else {
+            return PackedFloat32Array::from([].as_slice());
+        };
+        PackedFloat32Array::from(
+            bio.pyro
+                .fire_lod(
+                    &ter.hab,
+                    [x as f32, y as f32, z as f32],
+                    (radius as f32).max(8.0),
+                    limit.max(1) as usize,
+                )
+                .as_slice(),
+        )
+    }
+
+    /// OmniLight placement hint: {ok, x,y,z, energy, mass_kg}
+    #[func]
+    fn fire_light(&self) -> Dictionary {
+        let mut d = Dictionary::new();
+        let Some(bio) = self.bio.as_ref() else {
+            let _ = d.insert("ok", false);
+            return d;
+        };
+        match bio.pyro.fire_centroid_energy() {
+            Some((p, mass, energy)) => {
+                let _ = d.insert("ok", true);
+                let _ = d.insert("x", p[0] as f64);
+                let _ = d.insert("y", p[1] as f64);
+                let _ = d.insert("z", p[2] as f64);
+                let _ = d.insert("energy", energy as f64);
+                let _ = d.insert("mass_kg", mass as f64);
+            }
+            None => {
+                let _ = d.insert("ok", false);
+            }
+        }
+        d
+    }
+
+    #[func]
+    fn steam_at(&self, theta: f64, z: f64, r: f64) -> f64 {
+        let Some(bio) = self.bio.as_ref() else {
+            return 0.0;
+        };
+        bio.pyro.steam_at(theta as f32, z as f32, r as f32) as f64
+    }
+
+    /// Light aimed fuel. Key `F`.
+    #[func]
+    fn ignite_at(&mut self, p: Vector3) -> Dictionary {
+        let mut d = Dictionary::new();
+        // Pull nearby stands into the woodscape so a freshly approached tree
+        // is actually there to light.
+        if let (Some(bio), Some(ter)) = (self.bio.as_mut(), self.t.as_ref()) {
+            bio.realise_stands(ter, [p.x, p.y, p.z], 24.0, 4);
+        }
+        let (Some(bio), Some(ter)) = (self.bio.as_mut(), self.t.as_ref()) else {
+            let _ = d.insert("ok", false);
+            let _ = d.insert("why", "no world");
+            return d;
+        };
+        match bio.pyro.try_ignite_at(
+            &bio.woodscape,
+            ter,
+            &bio.soil,
+            &bio.weather,
+            &bio.water.depth,
+            [p.x, p.y, p.z],
+            "player",
+        ) {
+            Ok(()) => {
+                let _ = d.insert("ok", true);
+            }
+            Err(why) => {
+                let _ = d.insert("ok", false);
+                let _ = d.insert("why", why);
+            }
+        }
+        d
+    }
+
+    /// Spend carried water to douse / pond at aim. Key `9`.
+    #[func]
+    fn douse_at(&mut self, p: Vector3) -> Dictionary {
+        let mut d = Dictionary::new();
+        let taken = self.pack.take_mass(economy::bio_id::WATER, 8.0);
+        if taken < 0.5 {
+            let _ = d.insert("ok", false);
+            let _ = d.insert("why", "no water in pack");
+            return d;
+        }
+        let (Some(bio), Some(ter)) = (self.bio.as_mut(), self.t.as_ref()) else {
+            let _ = d.insert("ok", false);
+            let _ = d.insert("why", "no world");
+            return d;
+        };
+        let (th, z, _) = ter.hab.to_cyl([p.x, p.y, p.z]);
+        bio.pond_at(ter, th, z, taken / 1000.0);
+        let n = bio.pyro.douse_near([p.x, p.y, p.z], 3.0);
+        let _ = d.insert("ok", true);
+        let _ = d.insert("liters", taken as f64);
+        let _ = d.insert("embers", n as i64);
+        d
+    }
+
+    /// Spend carried lava into a flow at aim. Key `0`.
+    #[func]
+    fn pour_lava_at(&mut self, p: Vector3) -> Dictionary {
+        let mut d = Dictionary::new();
+        let taken = self.pack.take_mass(economy::bio_id::LAVA, 40.0);
+        if taken < 1.0 {
+            let _ = d.insert("ok", false);
+            let _ = d.insert("why", "no lava in pack");
+            return d;
+        }
+        let (Some(bio), Some(ter)) = (self.bio.as_mut(), self.t.as_ref()) else {
+            let _ = d.insert("ok", false);
+            let _ = d.insert("why", "no world");
+            return d;
+        };
+        let (th, z, _) = ter.hab.to_cyl([p.x, p.y, p.z]);
+        let dens = economy::bio_phys(economy::bio_id::LAVA).bulk_kg_m3.max(1.0);
+        let m3 = taken / dens;
+        bio.pyro.pour_lava(ter, th, z, m3, 1250.0);
+        let _ = d.insert("ok", true);
+        let _ = d.insert("kg", taken as f64);
+        d
+    }
+
     #[func]
     fn save_woodscape(&self) -> PackedByteArray {
         let bytes = self

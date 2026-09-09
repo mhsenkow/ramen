@@ -100,6 +100,15 @@ static func draw_ship(ci: CanvasItem, size: Vector2, world) -> void:
 		var col := Color(1.0, 0.84, 0.52, 0.9 if got[1] >= 0.0 else 0.30)
 		ci.draw_circle(got[0], 2.0, col)
 
+	# Romanceable cast seats — cooler, slightly larger than town dots.
+	if "cast_marks" in world:
+		for m in world.cast_marks:
+			var got2: Array = project(size, m.x, zn_of.call(m.y))
+			var near: bool = got2[1] >= 0.0
+			var col2 := Color(0.55, 0.82, 1.0, 0.95 if near else 0.35)
+			ci.draw_circle(got2[0], 3.0, col2)
+			ci.draw_circle(got2[0], 1.4, Color(0.92, 0.97, 1.0, 0.95 if near else 0.4))
+
 	if world.has_waypoint:
 		var w: Array = project(size, world.waypoint.x, zn_of.call(world.waypoint.y))
 		var wp: Vector2 = w[0]

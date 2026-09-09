@@ -208,11 +208,23 @@ func _ready() -> void:
 		RamaControls.vol_voice = v; RamaControls.save_cfg(); _audio_vols())
 
 	box = _page("GRAPHICS")
-	_note(box, "Quality: high → low → deck (foliage / LOD first)")
-	_option(box, ["high", "low", "deck"], RamaControls.quality, func(t):
-		RamaControls.quality = t; RamaControls.save_cfg()
+	_note(box, "Auto probes GPU/CPU on first launch; drops further if FPS tanks.")
+	var gfx_cur := "auto" if RamaControls.quality_auto else RamaControls.quality
+	_option(box, ["auto", "high", "deck", "low"], gfx_cur, func(t):
+		if t == "auto":
+			RamaControls.quality_auto = true
+			RamaControls.quality = RamaControls.detect_quality()
+		else:
+			RamaControls.quality_auto = false
+			RamaControls.quality = t
+		RamaControls.save_cfg()
 		if world and world.has_method("apply_quality"):
-			world.apply_quality())
+			world.apply_quality()
+		status.text = "Quality → %s (%s)" % [
+			RamaControls.quality,
+			RamaControls.quality_reason if RamaControls.quality_reason != "" else "manual"])
+	if RamaControls.quality_reason != "":
+		_note(box, "Now: %s — %s" % [RamaControls.quality, RamaControls.quality_reason])
 	_note(box, "Overlay palette (colour-blind safe)")
 	_option(box, ["default", "deuteranopia", "protanopia", "achroma"],
 			RamaControls.overlay_palette, func(t):
@@ -669,7 +681,10 @@ func _input(e: InputEvent) -> void:
 
 func open_first_run() -> void:
 	first_run_mode = true
-	status.text = "First run — set accessibility & content, then Resume."
+	var qhint := RamaControls.quality
+	if RamaControls.quality_reason != "":
+		qhint = "%s (%s)" % [RamaControls.quality, RamaControls.quality_reason]
+	status.text = "First run — graphics set to %s. Tweak a11y, then Resume." % qhint
 	open()
 
 func open_coop() -> void:

@@ -12,7 +12,7 @@ const ACTIONS := [
 	{"id": "right",     "label": "Strafe right",   "key": KEY_D,      "axis": [JOY_AXIS_LEFT_X, 1.0]},
 	{"id": "jump",      "label": "Jump",           "key": KEY_SPACE,  "btn": JOY_BUTTON_A},
 	{"id": "run",       "label": "Run",            "key": KEY_SHIFT,  "btn": JOY_BUTTON_LEFT_STICK},
-	{"id": "dig",       "label": "Excavate",       "key": KEY_F,      "mouse": MOUSE_BUTTON_LEFT,  "axis": [JOY_AXIS_TRIGGER_RIGHT, 1.0]},
+	{"id": "dig",       "label": "Excavate",       "mouse": MOUSE_BUTTON_LEFT,  "axis": [JOY_AXIS_TRIGGER_RIGHT, 1.0]},
 	{"id": "place",     "label": "Install module", "key": KEY_G,      "axis": [JOY_AXIS_TRIGGER_LEFT, 1.0]},
 	{"id": "fill",      "label": "Add material",   "key": KEY_R,      "btn": JOY_BUTTON_X},
 	{"id": "undo",      "label": "Undo excavation","key": KEY_Z,      "btn": JOY_BUTTON_B},
@@ -51,6 +51,9 @@ const ACTIONS := [
 	{"id": "save",      "label": "Save digs",      "key": KEY_F5,     "btn": JOY_BUTTON_BACK},
 	{"id": "load",      "label": "Load digs",      "key": KEY_F9,     "btn": JOY_BUTTON_GUIDE},
 	{"id": "bottle",    "label": "Scoop / pour water", "key": KEY_V, "btn": JOY_BUTTON_MISC1},
+	{"id": "ignite",    "label": "Ignite / fire",      "key": KEY_F, "btn": -1},
+	{"id": "douse",     "label": "Douse fire",         "key": KEY_9, "btn": -1},
+	{"id": "pour_lava", "label": "Pour lava",          "key": KEY_0, "btn": -1},
 	{"id": "soil",      "label": "Soil overlay",   "key": KEY_N,      "btn": JOY_BUTTON_TOUCHPAD},
 	{"id": "photo",     "label": "Photo mode",     "key": KEY_F11,    "btn": JOY_BUTTON_MISC1},
 	{"id": "quiet",     "label": "Quiet mode",     "key": KEY_F10,    "btn": JOY_BUTTON_TOUCHPAD},
@@ -76,6 +79,9 @@ static var vol_ui := 1.0
 static var vol_music := 0.7
 static var vol_voice := 1.0
 static var quality := "high"  # high | low | deck
+## When true, quality is chosen from GPU/CPU probes (and may drop further if FPS tanks).
+static var quality_auto := true
+static var quality_reason := ""
 static var overlay_palette := "default"  # default | deuteranopia | protanopia | achroma
 static var overlay_contours := true
 static var archive_enabled := true  # content setting stub (PD §8)
@@ -85,6 +91,68 @@ static var first_run_done := false
 static var right_click := "fill"  # fill | place
 
 static var quiet_mode := false
+
+## Pick a quality tier from export flags + GPU/CPU. Safe default for friends on
+## weak laptops: prefer something that boots over something pretty.
+static func detect_quality() -> String:
+	if OS.has_feature("deck"):
+		quality_reason = "Steam Deck export"
+		return "deck"
+	if OS.has_feature("lowspec"):
+		quality_reason = "low-spec export"
+		return "low"
+	if OS.has_feature("mobile"):
+		quality_reason = "mobile"
+		return "low"
+
+	var cores := OS.get_processor_count()
+	var gpu := RenderingServer.get_video_adapter_name()
+	var name := gpu.to_lower()
+	var dtype := RenderingServer.get_video_adapter_type()
+
+	# Apple Silicon is "integrated" but strong — don't punish M-series.
+	if "apple m" in name or name.begins_with("apple "):
+		# Base M1 (8-core) still fine at deck; Pro/Max/Ultra stay high.
+		if "m1" in name and "pro" not in name and "max" not in name and "ultra" not in name:
+			quality_reason = "Apple M1"
+			return "deck"
+		quality_reason = "Apple Silicon (%s)" % gpu
+		return "high"
+
+	# Software / VM / known-weak iGPUs — boot first.
+	for t in [
+		"llvmpipe", "swiftshader", "microsoft basic", "gdi generic",
+		"uhd graphics", "hd graphics", "iris plus", "radeon vega",
+		"radeon graphics", "mali-", "adreno", "intel(r) hd",
+	]:
+		if t in name:
+			quality_reason = "weak GPU (%s)" % gpu
+			return "low"
+	if "iris xe" in name:
+		quality_reason = "Intel Iris Xe"
+		return "deck"
+
+	if dtype == RenderingDevice.DEVICE_TYPE_CPU:
+		quality_reason = "software renderer"
+		return "low"
+	if dtype == RenderingDevice.DEVICE_TYPE_INTEGRATED_GPU:
+		quality_reason = "integrated GPU (%s)" % gpu
+		return "deck" if cores >= 6 else "low"
+
+	if cores <= 2:
+		quality_reason = "%d CPU cores" % cores
+		return "low"
+	if cores <= 4:
+		quality_reason = "%d CPU cores" % cores
+		return "deck"
+
+	var sz := DisplayServer.screen_get_size()
+	if sz.x * sz.y >= 3840 * 2160 and cores < 8:
+		quality_reason = "4K on mid CPU"
+		return "deck"
+
+	quality_reason = "GPU OK (%s, %d cores)" % [gpu, cores]
+	return "high"
 
 ## The player's build. An archetype, optionally blended toward a second one,
 ## then any individual axes moved by hand — the whole of `avatar/body.gd`'s
@@ -105,15 +173,23 @@ static func cfg_exists() -> bool:
 
 static func install() -> void:
 	load_cfg()
+	# Fire moved to F; dig is mouse-only. Drop stale overrides that would
+	# steal F back for excavate or leave ignite on the old 8.
+	if int(overrides.get("dig", -1)) == KEY_F:
+		overrides.erase("dig")
+	if int(overrides.get("ignite", -1)) == KEY_8:
+		overrides.erase("ignite")
 	for a in ACTIONS:
 		var name := act(a["id"])
 		if InputMap.has_action(name):
 			InputMap.erase_action(name)
 		InputMap.add_action(name, 0.25)
-		var k := int(overrides.get(a["id"], a["key"]))
-		var ev := InputEventKey.new()
-		ev.physical_keycode = k as Key
-		InputMap.action_add_event(name, ev)
+		if a.has("key") or overrides.has(a["id"]):
+			var k := int(overrides.get(a["id"], a.get("key", KEY_NONE)))
+			if k != KEY_NONE and k > 0:
+				var ev := InputEventKey.new()
+				ev.physical_keycode = k as Key
+				InputMap.action_add_event(name, ev)
 		if a.has("mouse"):
 			var m := InputEventMouseButton.new()
 			m.button_index = a["mouse"] as MouseButton
@@ -132,10 +208,14 @@ static func install() -> void:
 			j.axis = a["axis"][0] as JoyAxis
 			j.axis_value = a["axis"][1]
 			InputMap.action_add_event(name, j)
-	# Runtime feature flags from export / CLI.
+	# First launch (or quality set to Auto): probe hardware. Export presets win.
 	if OS.has_feature("deck") or OS.has_feature("lowspec"):
-		if quality == "high":
+		if quality_auto or quality == "high":
 			quality = "deck" if OS.has_feature("deck") else "low"
+			quality_auto = true
+			quality_reason = "export preset"
+	elif quality_auto:
+		quality = detect_quality()
 
 static func rebind(id: String, keycode: int) -> void:
 	overrides[id] = keycode
@@ -145,14 +225,19 @@ static func rebind(id: String, keycode: int) -> void:
 static func binding_name(id: String) -> String:
 	for a in ACTIONS:
 		if a["id"] == id:
-			var k := int(overrides.get(id, a["key"]))
-			var s := OS.get_keycode_string(k)
+			var parts: PackedStringArray = PackedStringArray()
+			if a.has("key") or overrides.has(id):
+				var k := int(overrides.get(id, a.get("key", KEY_NONE)))
+				if k != KEY_NONE and k > 0:
+					parts.append(OS.get_keycode_string(k))
 			if a.has("mouse"):
-				s += "  /  " + ("Left click" if a["mouse"] == MOUSE_BUTTON_LEFT else "Right click")
+				parts.append("Left click" if a["mouse"] == MOUSE_BUTTON_LEFT else "Right click")
 			elif (id == "fill" and right_click == "fill") \
 					or (id == "place" and right_click == "place"):
-				s += "  /  Right click"
-			return s
+				parts.append("Right click")
+			if parts.is_empty():
+				return "?"
+			return "  /  ".join(parts)
 	return "?"
 
 static func save_cfg() -> void:
@@ -172,6 +257,7 @@ static func save_cfg() -> void:
 	c.set_value("audio", "music", vol_music)
 	c.set_value("audio", "voice", vol_voice)
 	c.set_value("gfx", "quality", quality)
+	c.set_value("gfx", "quality_auto", quality_auto)
 	c.set_value("gfx", "overlay_palette", overlay_palette)
 	c.set_value("gfx", "overlay_contours", overlay_contours)
 	c.set_value("content", "archive_enabled", archive_enabled)
@@ -189,6 +275,7 @@ static func load_cfg() -> void:
 	var c := ConfigFile.new()
 	if c.load(CFG) != OK:
 		first_run_done = false
+		quality_auto = true
 		return
 	first_run_done = bool(c.get_value("meta", "first_run_done", true))
 	overrides = {}
@@ -208,6 +295,8 @@ static func load_cfg() -> void:
 	vol_music = float(c.get_value("audio", "music", vol_music))
 	vol_voice = float(c.get_value("audio", "voice", vol_voice))
 	quality = str(c.get_value("gfx", "quality", quality))
+	# Old configs have no quality_auto key — keep their saved tier (don't re-probe).
+	quality_auto = bool(c.get_value("gfx", "quality_auto", false))
 	overlay_palette = str(c.get_value("gfx", "overlay_palette", overlay_palette))
 	overlay_contours = bool(c.get_value("gfx", "overlay_contours", overlay_contours))
 	archive_enabled = bool(c.get_value("content", "archive_enabled", archive_enabled))
@@ -238,7 +327,8 @@ static func reset() -> void:
 	vol_ui = 1.0
 	vol_music = 0.7
 	vol_voice = 1.0
-	quality = "high"
+	quality_auto = true
+	quality = detect_quality()
 	overlay_palette = "default"
 	overlay_contours = true
 	archive_enabled = true

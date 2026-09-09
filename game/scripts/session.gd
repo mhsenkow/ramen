@@ -277,15 +277,15 @@ static func parse_invite(raw: String) -> Dictionary:
 		return {"ok": false, "error": "Paste the invite your friend sent."}
 	# Accept raw ip or ip:port for power users.
 	if s.contains(".") and not s.begins_with("RAMA"):
-		var ip := s
-		var p := DEFAULT_PORT
+		var raw_ip := s
+		var raw_port := DEFAULT_PORT
 		if ":" in s:
 			var bits := s.split(":")
-			ip = bits[0]
+			raw_ip = bits[0]
 			if bits.size() > 1 and str(bits[1]).is_valid_int():
-				p = int(bits[1])
-		if ip.split(".").size() == 4:
-			return {"ok": true, "ip": ip, "port": p}
+				raw_port = int(bits[1])
+		if raw_ip.split(".").size() == 4:
+			return {"ok": true, "ip": raw_ip, "port": raw_port}
 		return {"ok": false, "error": "Use a RAMA-XXXXX-XXXXX invite, or an IP address."}
 	s = s.replace("RAMA-", "").replace("-", "")
 	if s.length() < 10:
@@ -294,9 +294,9 @@ static func parse_invite(raw: String) -> Dictionary:
 	var bytes := _b32_decode(body)
 	if bytes.size() < 6:
 		return {"ok": false, "error": "Could not read that invite. Ask them to Copy Invite again."}
-	var ip := "%d.%d.%d.%d" % [bytes[0], bytes[1], bytes[2], bytes[3]]
-	var p2 := (int(bytes[4]) << 8) | int(bytes[5])
-	return {"ok": true, "ip": ip, "port": p2}
+	var decoded_ip := "%d.%d.%d.%d" % [bytes[0], bytes[1], bytes[2], bytes[3]]
+	var decoded_port := (int(bytes[4]) << 8) | int(bytes[5])
+	return {"ok": true, "ip": decoded_ip, "port": decoded_port}
 
 static func _b32_encode(data: PackedByteArray) -> String:
 	var out := ""
@@ -498,12 +498,12 @@ func set_perm(key: String, on: bool) -> void:
 		return
 	perms[key] = on
 	_rpc_perms.rpc(perms)
-	var label := {
+	var label: String = str({
 		"dig": "digging",
 		"work": "harvest & craft",
 		"build": "building",
 		"walk": "walking",
-	}.get(key, key)
+	}.get(key, key))
 	set_status("Friend %s: %s" % [label, "allowed" if on else "blocked"])
 
 func undo_guest() -> void:

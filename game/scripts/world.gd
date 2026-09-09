@@ -55,6 +55,8 @@ var dust: MultiMeshInstance3D
 var insects: MultiMeshInstance3D
 var census := {}
 var town_marks: Array = []
+## Romanceable cast plot seats for the drum map (docs/CAST_EIGHT.md).
+var cast_marks: Array = []
 var mini_vp: SubViewport
 var mini_cam: Camera3D
 var mini_overlay: Control
@@ -101,8 +103,9 @@ var agent_far: Dictionary = {}      # archetype -> MultiMeshInstance3D
 var agent_far_xf: Dictionary = {}   # archetype -> Array[Transform3D]
 var agent_far_col: Dictionary = {}  # archetype -> Array[Color]
 var agent_rigs: Array = []
-const AGENT_RIGS := 6
+const AGENT_RIGS := 8
 const AGENT_RIG_RANGE := 62.0
+const AGENT_TALK_RANGE := 14.0
 var work_mm: MultiMeshInstance3D
 var roof_mm: MultiMeshInstance3D
 var follower_mm: MultiMeshInstance3D
@@ -151,6 +154,11 @@ var plant_mm_far: MultiMeshInstance3D
 var woodscape_mm: MeshInstance3D
 var woodscape_revision := -1
 var woodscape_refresh_in := 0.0
+var debris_mm: MultiMeshInstance3D
+var fire_mm: MultiMeshInstance3D
+var fire_light: OmniLight3D
+var debris_refresh_in := 0.0
+var fire_refresh_in := 0.0
 var soil_overlay: TextureRect
 var soil_mode := 0
 var catchment_cache: PackedFloat32Array = PackedFloat32Array()
@@ -226,6 +234,9 @@ var grass_n_cap := GRASS_N
 var grass_radius_cap := GRASS_RADIUS
 var plant_lod_radius := 900.0
 var mid_span_eff := MID_SPAN
+var _perf_watch_s := 0.0
+var _perf_frames := 0
+var _perf_done := false
 
 func _ready() -> void:
 	shot_mode = "--shot" in OS.get_cmdline_user_args()
@@ -237,13 +248,20 @@ func _ready() -> void:
 	playtest = "--playtest" in OS.get_cmdline_user_args()
 	if "--fast-day" in OS.get_cmdline_user_args():
 		day_speed = FAST_DAY_MULT
+	# Bindings + quality probe before the expensive generate, so weak machines
+	# don't pay for high foliage/MSAA defaults on first frame.
+	RamaControls.install()
 	for a in OS.get_cmdline_user_args():
 		if a.begins_with("--quality="):
 			RamaControls.quality = a.split("=")[1]
+			RamaControls.quality_auto = false
 		if a == "--threaded":
 			threaded_meshing = true
 		if a == "--no-threaded":
 			threaded_meshing = false
+	print("[rama] quality=%s auto=%s — %s" % [
+		RamaControls.quality, RamaControls.quality_auto,
+		RamaControls.quality_reason if RamaControls.quality_reason != "" else "cfg"])
 	terrain = ClassDB.instantiate("RamaTerrain")
 	if terrain.has_method("set_threaded_meshing"):
 		terrain.set_threaded_meshing(threaded_meshing)
@@ -269,7 +287,6 @@ func _ready() -> void:
 		print("[rama] fast-day on (×%.0f) — F6 toggles" % day_speed)
 
 	clock = DAY_LENGTH * 0.30   # wake mid-morning, not at midnight
-	RamaControls.install()
 	menu = load("res://scripts/menu.gd").new()
 	menu.world = self
 	add_child(menu)
@@ -299,6 +316,7 @@ func _ready() -> void:
 	apply_quality()
 	_build_env()
 	_build_rama_sun()
+	apply_quality()  # sun exists now — shadows / scale take effect
 	_build_far()
 	_build_water()
 	_build_rivers()
@@ -310,6 +328,8 @@ func _ready() -> void:
 	_build_litter()
 	_build_agents()
 	_build_dwellings()
+	_place_cast_modules()
+	_refresh_cast_marks()
 	_build_carcasses()
 	_build_stations()
 	_build_steam()
@@ -327,6 +347,8 @@ func _ready() -> void:
 	_build_mid()
 	_build_plants()
 	_build_woodscape()
+	_build_debris()
+	_build_fire()
 	_build_overlays()
 	_build_panels()
 	player.ghost = _build_ghost()
@@ -398,7 +420,7 @@ func _offer_resume() -> void:
 			note(away_blurb)
 
 func apply_quality() -> void:
-	## Low-spec / Deck: cut foliage, LOD distance, haze first (§2194–2195).
+	## Low-spec / Deck: cut foliage, LOD distance, haze, MSAA, scale, shadows first (§2194–2195).
 	var vp := get_viewport()
 	match RamaControls.quality:
 		"low":
@@ -409,6 +431,9 @@ func apply_quality() -> void:
 			RenderingServer.global_shader_parameter_set("rama_haze", 0.72)
 			if vp:
 				vp.msaa_3d = Viewport.MSAA_DISABLED
+				vp.scaling_3d_scale = 0.70
+			if rama_sun:
+				rama_sun.shadow_enabled = false
 		"deck":
 			grass_n_cap = 2400
 			grass_radius_cap = 20.0
@@ -416,7 +441,12 @@ func apply_quality() -> void:
 			mid_span_eff = 1100.0
 			RenderingServer.global_shader_parameter_set("rama_haze", 0.85)
 			if vp:
-				vp.msaa_3d = Viewport.MSAA_2X
+				vp.msaa_3d = Viewport.MSAA_DISABLED
+				vp.scaling_3d_scale = 0.85
+			if rama_sun:
+				rama_sun.shadow_enabled = true
+				rama_sun.directional_shadow_mode = DirectionalLight3D.SHADOW_PARALLEL_2_SPLITS
+				rama_sun.directional_shadow_max_distance = 160.0
 		_:
 			grass_n_cap = GRASS_N
 			grass_radius_cap = GRASS_RADIUS
@@ -425,10 +455,42 @@ func apply_quality() -> void:
 			RenderingServer.global_shader_parameter_set("rama_haze", 1.0)
 			if vp:
 				vp.msaa_3d = Viewport.MSAA_2X
+				vp.scaling_3d_scale = 1.0
+			if rama_sun:
+				rama_sun.shadow_enabled = true
+				rama_sun.directional_shadow_mode = DirectionalLight3D.SHADOW_PARALLEL_2_SPLITS
+				rama_sun.directional_shadow_max_distance = 240.0
 	if grass_mm:
 		refresh_grass(true)
 	if player and terrain:
 		plant_data = terrain.plants_lod(player.theta, player.z, plant_lod_radius)
+
+func _tick_quality_watch(dt: float) -> void:
+	## After ~10s of real play, if FPS is bad, drop one tier so friends don't quit.
+	if _perf_done or shot_mode or playtest:
+		return
+	if menu and menu.visible:
+		return
+	if RamaControls.quality == "low":
+		_perf_done = true
+		return
+	_perf_watch_s += dt
+	_perf_frames += 1
+	if _perf_watch_s < 10.0:
+		return
+	var fps := float(_perf_frames) / maxf(_perf_watch_s, 0.001)
+	_perf_done = true
+	if fps >= 28.0:
+		return
+	var next := "deck" if RamaControls.quality == "high" else "low"
+	print("[rama] FPS ~%.0f — auto-dropping quality %s → %s" % [
+		fps, RamaControls.quality, next])
+	RamaControls.quality = next
+	RamaControls.quality_auto = true
+	RamaControls.quality_reason = "FPS watchdog (%.0f FPS)" % fps
+	RamaControls.save_cfg()
+	apply_quality()
+	note("Graphics set to %s — this machine was running at ~%.0f FPS." % [next, fps])
 
 func _selftest() -> void:
 	var tt := Time.get_ticks_msec()
@@ -1742,13 +1804,91 @@ func _build_agents() -> void:
 	plot_mm.name = "ColonistPlots"
 	add_child(plot_mm)
 
-## Which build a colonist has. Stable for the life of the save, because it is
-## derived from his id and nothing else — no table to persist, and the man you
-## met yesterday is the same shape today.
+## Which build a colonist has. Authored cast use fixed entry reads; utility
+## farmers stay hash(id) so saves do not need a table.
 func agent_archetype(id: int) -> String:
-	var h: int = (id * 2654435761) ^ 0x9E3779B9
-	h = (h ^ (h >> 15)) * 1274126177
-	return RamaBody.ORDER[posmod(h ^ (h >> 13), RamaBody.ORDER.size())]
+	match id:
+		1: return "bear"           # Hale — hydroponics
+		2: return "daddy"          # Casimir — tower founder
+		3: return "otter"          # Idris — delver
+		4: return "jock"           # Ren — contested steward
+		5: return "muscle_daddy"   # Jules — leather rain-bringer
+		6: return "cub"            # Oren — orchard
+		7: return "lanky"          # Sable — solitary terracer
+		8: return "twink"          # Lark — sociologist
+		_:
+			var h: int = (id * 2654435761) ^ 0x9E3779B9
+			h = (h ^ (h >> 15)) * 1274126177
+			return RamaBody.ORDER[posmod(h ^ (h >> 13), RamaBody.ORDER.size())]
+
+## Prefabs seeded by vocation on cast plots. Sim already owns GH/COND entities;
+## this only draws the matching meshes (and lifts Casimir's stack toward axis).
+func _place_cast_modules() -> void:
+	if terrain == null:
+		return
+	if not terrain.has_method("cast_modules_lod"):
+		return
+	var buf: PackedFloat32Array = terrain.cast_modules_lod()
+	var n: int = int(buf.size() / 5.0)
+	for i in n:
+		var th: float = buf[i * 5]
+		var zz: float = buf[i * 5 + 1]
+		var kind: int = clampi(int(buf[i * 5 + 2]), 0, MODULES.size() - 1)
+		var lift: float = buf[i * 5 + 3]
+		_spawn_module_mesh(th, zz, kind, lift)
+
+func _spawn_module_mesh(th: float, z: float, kind: int, lift_m: float = 0.0) -> void:
+	var spec: Dictionary = MODULES[kind]
+	var arc_step: float = 2.0 / float(P["radius"])
+	th = round(th / arc_step) * arc_step
+	z = round(z / 2.0) * 2.0
+	var gr: float = ground_at(th, z) - lift_m
+	var node := Node3D.new()
+	node.transform = frame_at(th, z, gr)
+	add_child(node)
+	var sz: Vector3 = spec["size"]
+	var body := _box(sz, spec["col"])
+	body.position = Vector3(0, sz.y * 0.5, 0)
+	node.add_child(body)
+	if spec["rows"]:
+		for row in 7:
+			var crop := _box(Vector3(sz.x - 0.8, 0.5, 0.35), Color(0.30, 0.46, 0.20))
+			crop.position = Vector3(0, sz.y + 0.25, -sz.z * 0.4 + row * (sz.z * 0.8 / 6.0))
+			node.add_child(crop)
+	if kind == 1:
+		var gbadge := Label3D.new()
+		gbadge.text = "GLASS"
+		gbadge.font_size = 42
+		gbadge.modulate = Color(0.65, 0.90, 0.85)
+		gbadge.position = Vector3(0, sz.y + 0.6, 0)
+		gbadge.billboard = BaseMaterial3D.BILLBOARD_ENABLED
+		node.add_child(gbadge)
+	if kind == 2:
+		var badge := Label3D.new()
+		badge.text = "COND"
+		badge.font_size = 48
+		badge.modulate = Color(0.7, 0.85, 1.0)
+		badge.position = Vector3(0, sz.y + 0.8, 0)
+		badge.billboard = BaseMaterial3D.BILLBOARD_ENABLED
+		node.add_child(badge)
+	if kind == 3:
+		var lamp := _box(Vector3(1.0, 0.6, 1.0), Color(1.0, 0.80, 0.45), true)
+		lamp.position = Vector3(0, sz.y + 0.3, 0)
+		node.add_child(lamp)
+	node.set_meta("kind", kind)
+	node.set_meta("theta", th)
+	node.set_meta("z", z)
+	node.set_meta("cast", true)
+	modules.append(node)
+
+func _refresh_cast_marks() -> void:
+	cast_marks.clear()
+	if terrain == null or not terrain.has_method("cast_plots_lod"):
+		return
+	var buf: PackedFloat32Array = terrain.cast_plots_lod()
+	var n: int = int(buf.size() / 3.0)
+	for i in n:
+		cast_marks.append(Vector2(buf[i * 3], buf[i * 3 + 1]))
 
 func refresh_agents() -> void:
 	if agent_root == null or terrain == null:
@@ -2016,14 +2156,19 @@ func refresh_dwellings() -> void:
 		var followers: float = buf[i * 9 + 3]
 		var works: int = int(buf[i * 9 + 4])
 		var quality: float = buf[i * 9 + 7]
+		var aid: int = int(buf[i * 9 + 8])
 		var spread: float = WORK_SPREAD[kind]
 		var base: Color = WORK_KIND_COL[kind]
+		# Casimir (id 2) / dense townships climb toward the axis.
+		var skyward: bool = kind == 2 and (works >= 5 or aid == 2)
 
 		for w in works:
 			# Golden-angle scatter so a growing township spirals outward
 			# instead of stacking rings.
 			var a: float = float(w) * 2.39996 + _dhash(i, 0) * TAU
 			var rad: float = spread * sqrt((float(w) + 0.6) / maxf(float(works), 1.0))
+			if skyward:
+				rad *= 0.55
 			var ox: float = cos(a) * rad
 			var oz: float = sin(a) * rad
 			var wth: float = th + ox / hab_r
@@ -2035,11 +2180,15 @@ func refresh_dwellings() -> void:
 			# A delve's works are cut into the hill: squat, and sunk enough to
 			# read as a doorway rather than a shed someone left on a mountain.
 			var sy: float = 0.55 if kind == 0 else 0.8 + hs * 0.6
+			if skyward:
+				sy *= 1.0 + float(w) * 0.12
 			var sxz: float = 1.15 if kind == 0 else 1.0
 			var seat: float = WORK_H * 0.5 * sy
 			if kind == 0:
 				seat *= 0.45
-			var xf: Transform3D = frame_at(wth, wzz, gr - seat)
+			# Tower stack: later works lift toward the spin axis.
+			var lift: float = float(w) * 2.8 if skyward else 0.0
+			var xf: Transform3D = frame_at(wth, wzz, gr - seat - lift)
 			xf.basis = xf.basis.rotated(xf.basis.y.normalized(), _dhash(i, w + 7) * TAU)
 			# scaled() scales in GLOBAL axes; on a cylinder that squashes the
 			# box along a world axis instead of its own up. scaled_local() is
@@ -2052,7 +2201,7 @@ func refresh_dwellings() -> void:
 			wc.append(wcol)
 			# Roof rides on the wall top, turned 45 deg so its ridge crosses
 			# the walls instead of lining up with them.
-			var rxf: Transform3D = frame_at(wth, wzz, gr - seat * 2.0 - ROOF_H * 0.5)
+			var rxf: Transform3D = frame_at(wth, wzz, gr - seat * 2.0 - ROOF_H * 0.5 - lift)
 			rxf.basis = xf.basis.rotated(xf.basis.y.normalized(), PI * 0.25)
 			rxf.basis = rxf.basis.scaled_local(Vector3(sxz, 1.0, sxz))
 			rx.append(rxf)
@@ -3141,6 +3290,159 @@ func refresh_woodscape(force := false) -> void:
 	# proxy visible; a harvested stand never resurrects an untouched distant tree.
 	_refresh_plants()
 
+const DEBRIS_RADIUS := 90.0
+const FIRE_RADIUS := 90.0
+
+func _build_debris() -> void:
+	var mm := MultiMesh.new()
+	mm.transform_format = MultiMesh.TRANSFORM_3D
+	mm.use_colors = true
+	# Same cube language as the woodscape — the falling piece is still the
+	# blocks you cut free, just no longer nailed to the grid.
+	var box := BoxMesh.new()
+	box.size = Vector3(0.55, 0.55, 0.55)
+	mm.mesh = box
+	mm.instance_count = 1
+	mm.set_instance_transform(0, Transform3D(Basis().scaled(Vector3.ZERO), Vector3.ZERO))
+	debris_mm = MultiMeshInstance3D.new()
+	debris_mm.multimesh = mm
+	var mat := StandardMaterial3D.new()
+	mat.albedo_color = Color(0.42, 0.28, 0.16)
+	mat.vertex_color_use_as_albedo = true
+	mat.roughness = 0.92
+	debris_mm.material_override = mat
+	debris_mm.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	debris_mm.name = "Debris"
+	add_child(debris_mm)
+
+func refresh_debris() -> void:
+	if debris_mm == null or player == null or terrain == null:
+		return
+	if not terrain.has_method("debris_lod"):
+		return
+	var feet: Vector3 = player.feet_pos()
+	if terrain.has_method("debris_step"):
+		terrain.debris_step(get_process_delta_time())
+	var data: PackedFloat32Array = terrain.debris_lod(
+			feet.x, feet.y, feet.z, DEBRIS_RADIUS, 6000)
+	var stride := 5
+	var n: int = int(data.size() / float(stride))
+	debris_mm.multimesh.instance_count = maxi(n, 1)
+	if n == 0:
+		debris_mm.multimesh.set_instance_transform(0,
+				Transform3D(Basis().scaled(Vector3.ZERO), Vector3.ZERO))
+		debris_mm.visible = false
+		return
+	debris_mm.visible = true
+	for i in n:
+		var o := i * stride
+		var p := Vector3(data[o], data[o + 1], data[o + 2])
+		var kind: int = int(data[o + 3])
+		var heat01: float = clampf(data[o + 4], 0.0, 1.0)
+		var sc: float = 1.15 if kind == 0 else 1.0
+		debris_mm.multimesh.set_instance_transform(i,
+				Transform3D(Basis().scaled(Vector3.ONE * sc), p))
+		var col: Color
+		if kind == 2:
+			col = Color(0.30, 0.48, 0.20)
+		else:
+			col = Color(0.42, 0.28, 0.16)
+		if heat01 > 0.05:
+			col = col.lerp(Color(0.95, 0.35, 0.08), heat01)
+		debris_mm.multimesh.set_instance_color(i, col)
+	_drain_debris_events()
+
+func _drain_debris_events() -> void:
+	if terrain == null or not terrain.has_method("debris_events"):
+		return
+	var evs: Array = terrain.debris_events()
+	for ev in evs:
+		var p := Vector3(float(ev.get("x", 0.0)), float(ev.get("y", 0.0)),
+				float(ev.get("z", 0.0)))
+		var energy: float = float(ev.get("energy", 1.0))
+		var kind: String = str(ev.get("kind", "impact"))
+		match kind:
+			"splash":
+				spawn_dig_splash(p, clampf(energy, 0.4, 3.0))
+			"beach":
+				spawn_debris_dust(p, 0.6)
+			_:
+				if audio:
+					audio.dig(clampf(energy, 0.8, 4.0), 0.55)
+				spawn_debris_dust(p, clampf(energy * 0.4, 0.4, 2.0))
+
+func spawn_debris_dust(p: Vector3, strength: float) -> void:
+	_spawn_burst(p, strength, clampi(8 + int(strength * 4.0), 6, 20),
+			Color(0.55, 0.48, 0.38, 0.7), -0.6, 1.8, Vector3.ZERO)
+
+func _build_fire() -> void:
+	var mm := MultiMesh.new()
+	mm.transform_format = MultiMesh.TRANSFORM_3D
+	mm.use_colors = true
+	var sph := SphereMesh.new()
+	sph.radius = 0.45
+	sph.height = 0.9
+	sph.radial_segments = 6
+	sph.rings = 3
+	mm.mesh = sph
+	mm.instance_count = 1
+	mm.set_instance_transform(0, Transform3D(Basis().scaled(Vector3.ZERO), Vector3.ZERO))
+	fire_mm = MultiMeshInstance3D.new()
+	fire_mm.multimesh = mm
+	var mat := StandardMaterial3D.new()
+	mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	mat.vertex_color_use_as_albedo = true
+	mat.emission_enabled = true
+	mat.emission = Color(1.0, 0.45, 0.1)
+	mat.emission_energy_multiplier = 2.4
+	fire_mm.material_override = mat
+	fire_mm.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	fire_mm.name = "Fire"
+	add_child(fire_mm)
+	fire_light = OmniLight3D.new()
+	fire_light.light_color = Color(1.0, 0.55, 0.25)
+	fire_light.light_energy = 0.0
+	fire_light.omni_range = 18.0
+	fire_light.name = "FireLight"
+	add_child(fire_light)
+
+func refresh_fire() -> void:
+	if fire_mm == null or player == null or terrain == null:
+		return
+	if not terrain.has_method("fire_lod"):
+		return
+	var feet: Vector3 = player.feet_pos()
+	var data: PackedFloat32Array = terrain.fire_lod(
+			feet.x, feet.y, feet.z, FIRE_RADIUS, 512)
+	var stride := 5
+	var n: int = int(data.size() / float(stride))
+	fire_mm.multimesh.instance_count = maxi(n, 1)
+	if n == 0:
+		fire_mm.multimesh.set_instance_transform(0,
+				Transform3D(Basis().scaled(Vector3.ZERO), Vector3.ZERO))
+		fire_mm.visible = false
+		if fire_light:
+			fire_light.light_energy = 0.0
+		return
+	fire_mm.visible = true
+	for i in n:
+		var o := i * stride
+		var p := Vector3(data[o], data[o + 1], data[o + 2])
+		var temp01: float = clampf(data[o + 3], 0.0, 1.0)
+		var size: float = maxf(data[o + 4], 0.2)
+		var xf := Transform3D(Basis().scaled(Vector3.ONE * size), p)
+		fire_mm.multimesh.set_instance_transform(i, xf)
+		fire_mm.multimesh.set_instance_color(i,
+				Color(1.0, 0.35 + 0.4 * temp01, 0.08, 0.95))
+	if fire_light and terrain.has_method("fire_light"):
+		var fl: Dictionary = terrain.fire_light()
+		if fl.get("ok", false):
+			fire_light.global_position = Vector3(
+					float(fl["x"]), float(fl["y"]), float(fl["z"]))
+			fire_light.light_energy = float(fl.get("energy", 0.0))
+		else:
+			fire_light.light_energy = 0.0
+
 ## Form id from plants_lod (0 conifer … 7 giant). Biome fallback if kind absent.
 func _biome_species(bid: int, kind: int = -1) -> int:
 	if kind >= 0:
@@ -3332,6 +3634,7 @@ func _build_overlays() -> void:
 	add_child(hud_layer)
 
 func _process(_dt: float) -> void:
+	_tick_quality_watch(_dt)
 	_tick_streaming()
 	_tick_daylight(_dt)
 	_tick_flow_refresh(_dt)
@@ -3345,6 +3648,14 @@ func _process(_dt: float) -> void:
 	woodscape_refresh_in = maxf(woodscape_refresh_in - _dt, 0.0)
 	if woodscape_refresh_in <= 0.0:
 		refresh_woodscape()
+	debris_refresh_in = maxf(debris_refresh_in - _dt, 0.0)
+	if debris_refresh_in <= 0.0:
+		debris_refresh_in = 0.05
+		refresh_debris()
+	fire_refresh_in = maxf(fire_refresh_in - _dt, 0.0)
+	if fire_refresh_in <= 0.0:
+		fire_refresh_in = 0.12
+		refresh_fire()
 	_tick_map_keys()
 	_tick_catchment(_dt)
 	_tick_splash(_dt)
@@ -3952,7 +4263,9 @@ func _push_hud(e: float, fx: float, heavy: bool = true) -> void:
 	ui.put("you", "pos", "%.0f m around  ·  z %+.0f m" % [arc_m, player.z])
 	ui.put("you", "elev", "%.1f m above hull" % e)
 	toast_t = maxf(toast_t - get_process_delta_time(), 0.0)
+	_update_cast_talk()
 	ui.toast(toast, clampf(toast_t, 0.0, 1.0))
+	_push_cast_compass()
 	if not heavy:
 		return
 
@@ -4654,6 +4967,124 @@ func home_bearing() -> String:
 ## Transient one-line feedback, shown by the HUD toast component.
 var toast := ""
 var toast_t := 0.0
+var _cast_talk_idx := -1
+
+func _update_cast_talk() -> void:
+	if terrain == null or player == null or RamaControls.hud_density == "off":
+		return
+	if not terrain.has_method("agent_blurb"):
+		return
+	var buf: PackedFloat32Array = terrain.agents_lod()
+	var n: int = int(buf.size() / 9.0)
+	var best_i := -1
+	var best_d := AGENT_TALK_RANGE
+	for i in n:
+		var th: float = buf[i * 9]
+		var zz: float = buf[i * 9 + 1]
+		var d: float = _arc_dist(player.theta, player.z, th, zz)
+		if d < best_d:
+			best_d = d
+			best_i = i
+	if best_i < 0:
+		_cast_talk_idx = -1
+		return
+	var romanceable: bool = terrain.agent_romanceable(best_i)
+	var agent_name: String = str(terrain.agent_name(best_i))
+	var line: String = str(terrain.agent_line(best_i))
+	var blurb: String = str(terrain.agent_blurb(best_i)) if romanceable else ""
+	var text: String = agent_name
+	if blurb != "":
+		text += "\n" + blurb
+	if line != "" and not line.begins_with(agent_name + ": " + blurb):
+		# Prefer the live line when it is not just the blurb echo.
+		if line.find(": ") >= 0:
+			text = line if blurb == "" else (agent_name + "\n" + blurb + "\n" + line.substr(line.find(": ") + 2))
+		else:
+			text += "\n" + line
+	if text != toast or best_i != _cast_talk_idx:
+		toast = text
+		_cast_talk_idx = best_i
+	# Stay readable while you are standing next to them.
+	toast_t = maxf(toast_t, 1.2)
+
+## Horizon-style top strip: cast by relative bearing to facing yaw.
+const CAST_COMPASS_COLS := [
+	Color(0.45, 0.78, 0.55),  # Hale
+	Color(0.85, 0.72, 0.40),  # Casimir
+	Color(0.72, 0.58, 0.48),  # Idris
+	Color(0.55, 0.70, 0.95),  # Ren
+	Color(0.70, 0.78, 0.88),  # Jules
+	Color(0.50, 0.82, 0.62),  # Oren
+	Color(0.78, 0.70, 0.55),  # Sable
+	Color(0.92, 0.68, 0.78),  # Lark
+]
+
+func _push_cast_compass() -> void:
+	if ui == null or not ui.has_method("set_cast_compass"):
+		return
+	if RamaControls.photo_mode or RamaControls.hud_density == "off":
+		if ui.has_method("show_cast_compass"):
+			ui.show_cast_compass(false)
+		return
+	if ui.has_method("show_cast_compass"):
+		ui.show_cast_compass(true)
+	var out: Array = []
+	if terrain != null and terrain.has_method("agents_lod"):
+		var buf: PackedFloat32Array = terrain.agents_lod()
+		var n: int = int(buf.size() / 9.0)
+		for i in n:
+			var romanceable: bool = true
+			if terrain.has_method("agent_romanceable"):
+				romanceable = terrain.agent_romanceable(i)
+			if not romanceable:
+				continue
+			var th: float = buf[i * 9]
+			var zz: float = buf[i * 9 + 1]
+			var aid: int = int(buf[i * 9 + 5])
+			var nm: String = str(terrain.agent_name(i)) if terrain.has_method("agent_name") else "?"
+			var dz: float = zz - player.z
+			var dth: float = wrapf(th - player.theta, -PI, PI)
+			var arc: float = dth * float(P["radius"])
+			var dist: float = sqrt(dz * dz + arc * arc)
+			var rel: float = rad_to_deg(wrapf(atan2(arc, dz) - player.yaw, -PI, PI))
+			var col: Color = CAST_COMPASS_COLS[clampi(aid - 1, 0, CAST_COMPASS_COLS.size() - 1)]
+			out.append({
+				"id": aid,
+				"name": nm,
+				"rel": rel,
+				"dist": dist,
+				"color": col,
+			})
+	# Home + waypoint as quieter marks so the strip also navigates.
+	if home != Vector2.ZERO:
+		var hz: float = home.y - player.z
+		var hth: float = wrapf(home.x - player.theta, -PI, PI)
+		var harc: float = hth * float(P["radius"])
+		out.append({
+			"id": -1,
+			"name": "Home",
+			"letter": "⌂",
+			"rel": rad_to_deg(wrapf(atan2(harc, hz) - player.yaw, -PI, PI)),
+			"dist": sqrt(hz * hz + harc * harc),
+			"color": Color(0.92, 0.88, 0.70),
+		})
+	if has_waypoint:
+		var wz: float = waypoint.y - player.z
+		var wth: float = wrapf(waypoint.x - player.theta, -PI, PI)
+		var warc: float = wth * float(P["radius"])
+		out.append({
+			"id": -2,
+			"name": "Mark",
+			"letter": "◆",
+			"rel": rad_to_deg(wrapf(atan2(warc, wz) - player.yaw, -PI, PI)),
+			"dist": sqrt(wz * wz + warc * warc),
+			"color": Color(0.40, 0.95, 0.70),
+		})
+	ui.set_cast_compass(out)
+
+func flash(msg: String) -> void:
+	toast = msg
+	toast_t = 3.0
 
 func note(t: String) -> void:
 	toast = t

@@ -27,6 +27,7 @@ const RamaControls = preload("res://scripts/controls.gd")
 ## Tab strip and the audited palette are shared with the pause menu, so the two
 ## panes cannot drift apart and the contrast gate has one file to audit.
 const TabStrip = preload("res://scripts/ui/tabs.gd")
+const CastCompass = preload("res://scripts/ui/cast_compass.gd")
 ## The book exists to be readable, so its type is a size up from the plates.
 const BOOK_FONT_BOOST := 1.45
 
@@ -36,6 +37,7 @@ var _docks := {}
 var _home := {}
 var _toast: Label
 var _toast_bg: PanelContainer
+var _compass: CastCompass
 var _font_mul := 1.0
 var _layout_dirty := true
 
@@ -124,6 +126,10 @@ func _ready() -> void:
 	_toast.size_flags_vertical = Control.SIZE_SHRINK_CENTER
 	_toast_bg.add_child(_toast)
 
+	_compass = CastCompass.new()
+	_compass.name = "CastCompass"
+	_root.add_child(_compass)
+
 	_build_book()
 
 # ------------------------------------------------------------ public API --
@@ -175,9 +181,22 @@ func toast(text: String, alpha: float) -> void:
 		_request_layout()
 	_toast_bg.modulate.a = clampf(alpha, 0.0, 1.0)
 
+## Horizon-style strip: cast (and optional home/mark) by relative bearing.
+func set_cast_compass(marks: Array) -> void:
+	if _compass == null:
+		return
+	_compass.set_marks(marks)
+
+func show_cast_compass(on: bool) -> void:
+	if _compass == null:
+		return
+	_compass.visible = on
+
 func apply_font_scale(font_mul: float) -> void:
 	_font_mul = clampf(font_mul, 0.85, 1.4)
 	_toast.add_theme_font_size_override("font_size", roundi(13.0 * _font_mul))
+	if _compass != null:
+		_compass.set_font_scale(_font_mul)
 	var mul: float = _font_mul * (BOOK_FONT_BOOST if _open else 1.0)
 	for id in panels: panels[id].apply_font_scale(mul)
 	if _hint != null:
@@ -192,6 +211,8 @@ func set_density(mode: String) -> void:
 		# Photo mode and HUD-off mean off, book included.
 		close_book()
 		return
+	if _compass != null:
+		_compass.visible = true
 	if mode == "full": return
 	var allow: Array = ["you", "habitat"] if mode == "minimal" else ["you", "habitat", "ground", "colony"]
 	for id in panels:
@@ -439,20 +460,20 @@ func _refresh_craft() -> void:
 		_craft_head.text = "no recipes"
 		return
 	_craft_sel = clampi(_craft_sel, 0, _craft_count - 1)
-	var ready := 0
+	var ready_n := 0
 	for i in _craft_count:
 		var r: Dictionary = sim.recipe_at(i)
 		if not r.get("ok", false):
 			continue
-		var scale: float = float(r.get("max_scale", 0.0))
+		var max_sc: float = float(r.get("max_scale", 0.0))
 		var near: bool = bool(r.get("station_near", true))
-		if scale >= 0.05 and near:
-			ready += 1
-		_craft_rows.add_child(_craft_row(i, r, scale, near))
+		if max_sc >= 0.05 and near:
+			ready_n += 1
+		_craft_rows.add_child(_craft_row(i, r, max_sc, near))
 	_craft_head.text = "%d of %d ready  ·  enter makes the highlighted one" % [
-			ready, _craft_count]
+			ready_n, _craft_count]
 
-func _craft_row(i: int, r: Dictionary, scale: float, near: bool) -> Control:
+func _craft_row(i: int, r: Dictionary, max_sc: float, near: bool) -> Control:
 	var box := VBoxContainer.new()
 	box.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	box.add_theme_constant_override("separation", 1)
@@ -471,7 +492,7 @@ func _craft_row(i: int, r: Dictionary, scale: float, near: bool) -> Control:
 		pc.add_theme_stylebox_override("panel", plate)
 		pc.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 		pc.add_child(box)
-		_fill_craft_row(box, r, scale, near, picked)
+		_fill_craft_row(box, r, max_sc, near, picked)
 		return pc
 	var pad := MarginContainer.new()
 	pad.add_theme_constant_override("margin_left", 13)
@@ -479,10 +500,10 @@ func _craft_row(i: int, r: Dictionary, scale: float, near: bool) -> Control:
 	pad.add_theme_constant_override("margin_bottom", 4)
 	pad.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	pad.add_child(box)
-	_fill_craft_row(box, r, scale, near, picked)
+	_fill_craft_row(box, r, max_sc, near, picked)
 	return pad
 
-func _fill_craft_row(box: VBoxContainer, r: Dictionary, scale: float,
+func _fill_craft_row(box: VBoxContainer, r: Dictionary, max_sc: float,
 		near: bool, picked: bool) -> void:
 	var head := HBoxContainer.new()
 	head.add_theme_constant_override("separation", 12)
@@ -512,11 +533,11 @@ func _fill_craft_row(box: VBoxContainer, r: Dictionary, scale: float,
 	if not near:
 		state.text = "needs a %s" % str(r.get("station", "station"))
 		state.add_theme_color_override("font_color", Color(0.91, 0.65, 0.35))
-	elif scale < 0.05:
+	elif max_sc < 0.05:
 		state.text = "short"
 		state.add_theme_color_override("font_color", Color(0.85, 0.55, 0.50))
 	else:
-		state.text = "ready x%.1f" % scale
+		state.text = "ready x%.1f" % max_sc
 		state.add_theme_color_override("font_color", Color(0.62, 0.82, 0.66))
 	state.custom_minimum_size.x = 132.0 * _font_mul
 	state.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
@@ -562,13 +583,13 @@ func _craft_selected() -> void:
 	if not bool(r.get("station_near", true)):
 		toast("needs a %s nearby" % str(r.get("station", "station")), 1.0)
 		return
-	var scale: float = float(r.get("max_scale", 0.0))
-	if scale < 0.05:
+	var max_sc: float = float(r.get("max_scale", 0.0))
+	if max_sc < 0.05:
 		toast("not enough for %s" % str(r.get("id", "that")).replace("_", " "), 1.0)
 		return
-	var res: Dictionary = sim.craft_here(_craft_sel, scale)
+	var res: Dictionary = sim.craft_here(_craft_sel, max_sc)
 	if res.get("ok", false):
-		toast("made %s x%.1f" % [str(r.get("id", "?")).replace("_", " "), scale], 1.0)
+		toast("made %s x%.1f" % [str(r.get("id", "?")).replace("_", " "), max_sc], 1.0)
 	else:
 		toast("could not make it: %s" % str(res.get("error", "unknown")), 1.0)
 	_refresh_craft()
@@ -755,6 +776,18 @@ func _layout() -> void:
 	_docks.upper_center.position = Vector2(center_x, margin)
 	_docks.lower_center.position = Vector2(center_x, screen.y - margin - low_mid)
 	_docks.right.position = Vector2(screen.x - margin - width, maxf(280.0, screen.y * 0.32))
+
+	# Cast compass — Horizon strip, centred under the top edge, above docks.
+	if _compass != null and _compass.visible:
+		var cw: float = clampf(screen.x * 0.42, 280.0, 560.0) * _font_mul
+		var ch: float = maxf(46.0 * _font_mul, _compass.custom_minimum_size.y)
+		_compass.size = Vector2(cw, ch)
+		_compass.position = Vector2((screen.x - cw) * 0.5, 8.0)
+		# Keep the upper-centre colony plate from sitting under the strip.
+		_docks.upper_center.position.y = margin + ch + 6.0
+		_docks.upper_left.position.y = margin + ch * 0.35
+		_docks.right.position.y = maxf(280.0, screen.y * 0.32) + ch * 0.2
+
 	# Compact banner above the bottom instruments — never a mid-screen slab.
 	#
 	# Given one fixed width rather than measured twice. An autowrapping Label

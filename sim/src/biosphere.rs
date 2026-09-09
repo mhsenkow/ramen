@@ -4,12 +4,14 @@
 use crate::agent::AgentSim;
 use crate::biome;
 use crate::chronicle::Chronicle;
+use crate::debris::Debris;
 use crate::dwelling::Dwellings;
 use crate::economy::{Atmosphere, Greenhouse};
 use crate::erosion::{self, Erosion};
 use crate::lakes::Lakes;
 use crate::material;
 use crate::plant::PlantSim;
+use crate::pyro::Pyro;
 use crate::soil::{Soil, ST, SZ};
 use crate::sph::SurfaceWater;
 use crate::terrain::{idx, Terrain, NT, NZ};
@@ -56,6 +58,10 @@ pub struct Biosphere {
     last_talus_day: f32,
     /// Connected wood/leaf voxels — Minecraft combine + env growth.
     pub woodscape: Woodscape,
+    /// Falling / rolling / floating debris bodies.
+    pub debris: Debris,
+    /// Heat, fire, lava, steam.
+    pub pyro: Pyro,
 }
 
 /// Biome from the site fields alone — the same reading `Biosphere::biome_at`
@@ -110,23 +116,49 @@ impl Biosphere {
         agents.seed_farmers(&hab, &ter.elev, 10);
         // Site each principal on the ground their traits reach for, then move
         // them to it — a man lives where he chose to live, not where the
-        // scatter dropped him. Capacity is surveyed against the real
-        // heightfield and the real soil, so a bad site simply cannot grow.
+        // scatter dropped him. Authored cast keep a tight seat so province
+        // identity survives (`docs/CAST_EIGHT.md`).
         let mut dwellings = Dwellings::default();
         for ag in &agents.agents {
-            dwellings.site(
-                &hab,
-                &ter.elev,
-                Some(&soil),
-                ag.id,
-                ag.theta,
-                ag.z,
-                ag.traits.patience,
-                ag.traits.risk,
-                ag.traits.care,
-                ag.traits.social,
-                0.0,
-            );
+            // Authored cast + Ren's meadow neighbour stay local so watershed
+            // contest and province seats survive.
+            let tight = ag.romanceable || ag.name == "Pax";
+            if tight {
+                dwellings.site_near(
+                    &hab,
+                    &ter.elev,
+                    Some(&soil),
+                    ag.id,
+                    ag.theta,
+                    ag.z,
+                    ag.traits.patience,
+                    ag.traits.risk,
+                    ag.traits.care,
+                    ag.traits.social,
+                    0.0,
+                );
+            } else {
+                dwellings.site(
+                    &hab,
+                    &ter.elev,
+                    Some(&soil),
+                    ag.id,
+                    ag.theta,
+                    ag.z,
+                    ag.traits.patience,
+                    ag.traits.risk,
+                    ag.traits.care,
+                    ag.traits.social,
+                    0.0,
+                );
+            }
+        }
+        // Casimir's skyline: start with a tower of works.
+        if let Some(cas) = agents.agents.iter().find(|a| a.name == "Casimir") {
+            if let Some(d) = dwellings.list.iter_mut().find(|d| d.agent_id == cas.id) {
+                d.works = 8;
+                d.followers = 4.0;
+            }
         }
         dwellings.mark_contested(hab.radius);
         for ag in &mut agents.agents {
@@ -135,6 +167,23 @@ impl Biosphere {
                 ag.z = d.z;
                 ag.plot_theta = d.theta;
                 ag.plot_z = d.z;
+            }
+        }
+        agents.seed_cast_modules(&hab);
+        let mut greenhouses = Vec::new();
+        for m in &agents.cast_modules {
+            match m.kind {
+                crate::agent::module_kind::GREENHOUSE => {
+                    greenhouses.push(Greenhouse {
+                        theta: m.theta,
+                        z: m.z,
+                        radius: 12.0,
+                    });
+                }
+                crate::agent::module_kind::CONDENSER => {
+                    let _ = weather.try_add_condenser(m.theta, m.z, 1.0);
+                }
+                _ => {}
             }
         }
         let n_sum: f32 = soil.n.iter().sum();
@@ -183,7 +232,7 @@ impl Biosphere {
             carbon_stock: 5.0e5,
             energy_stock: energy,
             atmosphere: Atmosphere::default(),
-            greenhouses: Vec::new(),
+            greenhouses,
             erosion_seed: hab.seed ^ 0xE20D,
             water_seed: wseed,
             hardness,
@@ -191,6 +240,8 @@ impl Biosphere {
             last_survey_day: -10.0,
             last_talus_day: -10.0,
             woodscape: Woodscape::default(),
+            debris: Debris::default(),
+            pyro: Pyro::default(),
         }
     }
 
@@ -283,6 +334,29 @@ impl Biosphere {
                 self.hardness = build_hardness(ter);
             }
         }
+
+        // Hot half, then debris — a log that lands in fire ignites this tick,
+        // and lava that solidified is already ground under a body.
+        self.pyro.tick(
+            ter,
+            &mut self.woodscape,
+            &mut self.soil,
+            &self.weather,
+            &mut self.atmosphere,
+            &mut self.water.depth,
+            &mut self.water_stock,
+            heaps,
+            &mut self.debris,
+            dt_days,
+        );
+        self.debris.tick(
+            ter,
+            &self.water.depth,
+            heaps,
+            dt_days,
+            player_theta,
+            player_z,
+        );
 
         self.plants.tick(
             dt_days,
@@ -1123,6 +1197,13 @@ mod tests {
         // needs a flag of its own to be distinguishable from background creep.
         for _ in 0..40 {
             bio.tick(&mut ter, 0.03, 1.0, 0.0, &mut Vec::new());
+        }
+        // Colonists can dig during settle and raise urgent; drain that so the
+        // assertion below is about *our* dig, not theirs.
+        let mut drain = 0.0f32;
+        while ter.flow.is_urgent() && drain < 1.0 {
+            bio.tick(&mut ter, 0.01, 1.0, 0.0, &mut Vec::new());
+            drain += 0.01;
         }
         assert!(!ter.flow.is_urgent(), "nothing has been dug yet");
 

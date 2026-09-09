@@ -9,6 +9,8 @@ mod biosphere;
 mod chronicle;
 #[path = "../chunker.rs"]
 mod chunker;
+#[path = "../debris.rs"]
+mod debris;
 #[path = "../dwelling.rs"]
 mod dwelling;
 #[path = "../economy.rs"]
@@ -41,6 +43,8 @@ mod persist;
 mod plant;
 #[path = "../province.rs"]
 mod province;
+#[path = "../pyro.rs"]
+mod pyro;
 #[path = "../soil.rs"]
 mod soil;
 #[path = "../sph.rs"]

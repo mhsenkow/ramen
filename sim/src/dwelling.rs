@@ -306,13 +306,52 @@ impl Dwellings {
         social: f32,
         day: f32,
     ) {
+        self.site_search(
+            hab, elev, soil, agent_id, theta, z, patience, risk, care, social, day, 320.0,
+        );
+    }
+
+    /// Authored cast: keep the province seat; only nudge within ~90 m.
+    pub fn site_near(
+        &mut self,
+        hab: &Habitat,
+        elev: &[f32],
+        soil: Option<&Soil>,
+        agent_id: u32,
+        theta: f32,
+        z: f32,
+        patience: f32,
+        risk: f32,
+        care: f32,
+        social: f32,
+        day: f32,
+    ) {
+        self.site_search(
+            hab, elev, soil, agent_id, theta, z, patience, risk, care, social, day, 90.0,
+        );
+    }
+
+    fn site_search(
+        &mut self,
+        hab: &Habitat,
+        elev: &[f32],
+        soil: Option<&Soil>,
+        agent_id: u32,
+        theta: f32,
+        z: f32,
+        patience: f32,
+        risk: f32,
+        care: f32,
+        social: f32,
+        day: f32,
+        search_m: f32,
+    ) {
         let kind = kind_for(patience, risk, care, social);
         let (dt_m, dz_m) = cell_spacing(hab);
         let ti0 = (theta / std::f32::consts::TAU * NT as f32).round() as i32;
         let zi0 = ((z / hab.length + 0.5) * NZ as f32).round() as i32;
-        // Search a 320 m neighbourhood, striding so this stays cheap.
-        let rt = (320.0 / dt_m) as i32;
-        let rz = (320.0 / dz_m) as i32;
+        let rt = (search_m / dt_m) as i32;
+        let rz = (search_m / dz_m) as i32;
         let stride = 3i32;
 
         let mut best = f32::NEG_INFINITY;
@@ -341,7 +380,7 @@ impl Dwellings {
                     // site — they live where they already are, roughly.
                     let mx = dt as f32 * dt_m;
                     let my = dz as f32 * dz_m;
-                    let pull = (mx * mx + my * my).sqrt() / 320.0 * 0.35;
+                    let pull = (mx * mx + my * my).sqrt() / search_m.max(1.0) * 0.35;
                     if s - pull > best {
                         best = s - pull;
                         best_ti = ti;

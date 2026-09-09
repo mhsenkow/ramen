@@ -39,6 +39,15 @@ func _draw() -> void:
 		var mv: float = clamp(m.y / L + 0.5, 0.0, 1.0)
 		draw_circle(Vector2(mu * s.x, mv * s.y), 2.0, Color(1.0, 0.84, 0.52, 0.85))
 
+	# Romanceable cast plots — cooler dots you can walk a lap to find.
+	if "cast_marks" in world:
+		for m in world.cast_marks:
+			var cu: float = fposmod(m.x, TAU) / TAU
+			var cv: float = clamp(m.y / L + 0.5, 0.0, 1.0)
+			var cp := Vector2(cu * s.x, cv * s.y)
+			draw_circle(cp, 3.2, Color(0.45, 0.75, 1.0, 0.9))
+			draw_circle(cp, 1.5, Color(0.92, 0.97, 1.0, 0.95))
+
 	if world.has_waypoint:
 		var wu: float = fposmod(world.waypoint.x, TAU) / TAU
 		var wv: float = clamp(world.waypoint.y / L + 0.5, 0.0, 1.0)

@@ -82,6 +82,12 @@ var trail_mesh: ImmediateMesh
 var god_mode := false
 ## 0/1/2 → keys 1/2/3. Gear 3 is for crossing the habitat fast.
 var speed_gear := 1
+## Hold forward at run gear without holding W/Shift. Toggle with ↑↑↓↓←→←→.
+var auto_run := false
+var _konami: Array = []
+var _konami_age := 0.0
+const KONAMI := ["U", "U", "D", "D", "L", "R", "L", "R"]
+const KONAMI_GAP := 1.15
 
 func _ready() -> void:
 	cam = Camera3D.new()
@@ -218,6 +224,14 @@ func _input(e: InputEvent) -> void:
 			brush = clampf(brush - 0.18, 1.2, 7.0)
 		elif e.button_index == MOUSE_BUTTON_WHEEL_RIGHT:
 			brush = clampf(brush + 0.18, 1.2, 7.0)
+	# Arrow-key Konami path (WASD is handled in _actions via move bindings).
+	if e is InputEventKey and e.pressed and not e.echo and woke \
+			and not (world.menu and world.menu.visible):
+		match e.keycode:
+			KEY_UP: _konami_press("U")
+			KEY_DOWN: _konami_press("D")
+			KEY_LEFT: _konami_press("L")
+			KEY_RIGHT: _konami_press("R")
 	if e is InputEventMouseMotion and Input.mouse_mode == Input.MOUSE_MODE_CAPTURED:
 		var sens: float = RamaControls.sensitivity
 		var iy: float = -1.0 if RamaControls.invert_y else 1.0
@@ -342,7 +356,9 @@ func _edit(remove: bool) -> void:
 			if fell_kg > 0.5:
 				world.refresh_stockpiles()
 				world.force_plant_refresh()
-				world.note("%s · %.0f kg came down · L to take" % [bite, fell_kg])
+				if world.has_method("refresh_debris"):
+					world.refresh_debris()
+				world.note("%s · %.0f kg came down · watch it roll · L later" % [bite, fell_kg])
 				if world.audio:
 					world.audio.dig(4.0, 0.75)
 				world.spawn_dig_chips(p, hit.get("normal", Vector3.UP),
@@ -522,6 +538,10 @@ func _bottle_water() -> void:
 # ------------------------------------------------------------------- tick --
 
 func _physics_process(dt: float) -> void:
+	if not _konami.is_empty():
+		_konami_age += dt
+		if _konami_age > KONAMI_GAP:
+			_konami.clear()
 	if not woke:
 		wake_t += dt
 		# Waking up: eyes open on the ground, then you get to your feet.
@@ -554,6 +574,14 @@ func _physics_process(dt: float) -> void:
 	var fwd := -mv.y
 	var side := mv.x
 	var running: bool = Input.is_action_pressed(RamaControls.act("run"))
+	if auto_run:
+		# Back cancels; otherwise keep pushing forward at run speed.
+		if fwd < -0.15:
+			auto_run = false
+			world.note("auto-run off")
+		else:
+			fwd = 1.0
+			running = true
 	_enc_age += dt
 	if _enc_age > 0.25 and world.terrain:
 		_enc_age = 0.0
@@ -737,6 +765,24 @@ func _pad_look(dt: float) -> void:
 	pitch = clamp(pitch - ly * pad_sens * dt * iy, -1.45, 1.45)
 	_look_dirty = true
 
+func _konami_press(dir: String) -> void:
+	if _konami_age > KONAMI_GAP:
+		_konami.clear()
+	_konami_age = 0.0
+	_konami.append(dir)
+	if _konami.size() > KONAMI.size():
+		_konami.pop_front()
+	# Allow a wrong mid-sequence restart if the new press matches the start.
+	while not _konami.is_empty() and _konami != KONAMI.slice(0, _konami.size()):
+		_konami.pop_front()
+	if _konami == KONAMI:
+		_konami.clear()
+		auto_run = not auto_run
+		if auto_run:
+			world.note("auto-run on — S / ↓ to stop")
+		else:
+			world.note("auto-run off")
+
 ## One place where every binding is consulted, so keyboard, mouse and gamepad
 ## all take the same path.
 func _actions(dt: float) -> void:
@@ -746,6 +792,15 @@ func _actions(dt: float) -> void:
 		return
 	if world.menu and world.menu.visible:
 		return
+	# WASD / stick Konami — same ↑↑↓↓←→←→ sequence as the arrow keys.
+	if Input.is_action_just_pressed(A.act("forward")):
+		_konami_press("U")
+	elif Input.is_action_just_pressed(A.act("back")):
+		_konami_press("D")
+	elif Input.is_action_just_pressed(A.act("left")):
+		_konami_press("L")
+	elif Input.is_action_just_pressed(A.act("right")):
+		_konami_press("R")
 	if Input.is_action_just_pressed(A.act("god")):
 		god_mode = not god_mode
 		vr = 0.0
@@ -787,6 +842,8 @@ func _actions(dt: float) -> void:
 			world.force_plant_refresh()
 			world.refresh_stockpiles()
 			world.refresh_woodscape(true)
+			if world.has_method("refresh_debris"):
+				world.refresh_debris()
 			var timber_h: float = float(hy.get("timber_kg", 0.0))
 			if timber_h > 0.05:
 				world.note("harvested · +%.0f kg timber" % timber_h)
@@ -796,6 +853,52 @@ func _actions(dt: float) -> void:
 				world.session._flush_host_events()
 		else:
 			world.note("nothing to harvest")
+		return
+	if Input.is_action_just_pressed(A.act("ignite")):
+		var hit_ig: Dictionary = aim()
+		if hit_ig.get("hit", false) and world.terrain.has_method("ignite_at"):
+			# Centre on the wood cell when the ray struck vegetation.
+			var pt: Vector3 = hit_ig.get("bite_at", hit_ig["point"]) \
+					if hit_ig.get("vegetation", false) else hit_ig["point"]
+			var ig: Dictionary = world.terrain.ignite_at(pt)
+			if ig.get("ok", false):
+				world.note("lit")
+				if world.has_method("refresh_fire"):
+					world.fire_refresh_in = 0.0
+					world.refresh_fire()
+				world.refresh_woodscape(true)
+				if world.audio:
+					world.audio.dig(1.2, 0.35)
+			else:
+				world.note(str(ig.get("why", "won't light")))
+		else:
+			world.note("aim at wood or leaves")
+		return
+	if Input.is_action_just_pressed(A.act("douse")):
+		var hit_d: Dictionary = aim()
+		if hit_d.get("hit", false) and world.terrain.has_method("douse_at"):
+			var du: Dictionary = world.terrain.douse_at(hit_d["point"])
+			if du.get("ok", false):
+				world.note("doused · %.0f L" % float(du.get("liters", 0.0)))
+				if world.has_method("refresh_fire"):
+					world.refresh_fire()
+				world.schedule_pool_refresh()
+			else:
+				world.note(str(du.get("why", "no water")))
+		else:
+			world.note("aim at the fire")
+		return
+	if Input.is_action_just_pressed(A.act("pour_lava")):
+		var hit_l: Dictionary = aim()
+		if hit_l.get("hit", false) and world.terrain.has_method("pour_lava_at"):
+			var lv: Dictionary = world.terrain.pour_lava_at(hit_l["point"])
+			if lv.get("ok", false):
+				world.note("poured lava · %.0f kg" % float(lv.get("kg", 0.0)))
+				world.schedule_pool_refresh()
+			else:
+				world.note(str(lv.get("why", "no lava")))
+		else:
+			world.note("aim at the ground")
 		return
 	if Input.is_action_pressed(A.act("bottle")):
 		_bottle_water()
@@ -971,12 +1074,12 @@ func _refresh_aim() -> void:
 			# an armful and delivered a notch.
 			var veg: bool = hit.get("vegetation", false)
 			var pt: Vector3 = hit.get("bite_at", hit["point"]) if veg else hit["point"]
-			var r: float = brush * (float(hit.get("bite_scale", 1.0)) if veg else 1.0)
+			var bite_r: float = brush * (float(hit.get("bite_scale", 1.0)) if veg else 1.0)
 			var radial := Vector3(-pt.x, -pt.y, 0.0).normalized()
 			var ax := Vector3(0, 0, 1)
 			var rt := radial.cross(ax).normalized()
 			highlight.transform = Transform3D(Basis(rt, radial, ax), pt)
-			highlight.scale = Vector3(r, 0.22 if level_brush and not veg else r, r)
+			highlight.scale = Vector3(bite_r, 0.22 if level_brush and not veg else bite_r, bite_r)
 	if ghost:
 		# Only while you are actually placing. This had no mode gate at all, so
 		# the module ghost — a 9 x 9 m farm bed by default — sat translucent

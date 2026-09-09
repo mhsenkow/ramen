@@ -2,15 +2,82 @@
 //!
 //! Rule (1401): agents act only through the same world operations the player
 //! uses. No agent-only affordances.
+//!
+//! The first eight principals are the authored romance cast (`docs/CAST_EIGHT.md`).
 
 use crate::chronicle::{Chronicle, EventKind};
 use crate::economy::{self, bio_id, craft_id, Inventory};
 use crate::habitat::Habitat;
 use crate::plant::PlantSim;
+use crate::province;
 use crate::soil::Soil;
 use crate::terrain::Terrain;
 
 pub const MAX_AGENTS_T0: usize = 16;
+pub const CAST_SIZE: usize = 8;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Vocation {
+    Hydroponics,
+    Tower,
+    Delve,
+    Steward,
+    Condenser,
+    Orchard,
+    Terrace,
+    Gossip,
+    /// Unnamed utility farmer past the authored eight.
+    Utility,
+}
+
+impl Vocation {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Vocation::Hydroponics => "hydroponics",
+            Vocation::Tower => "tower",
+            Vocation::Delve => "delve",
+            Vocation::Steward => "steward",
+            Vocation::Condenser => "condenser",
+            Vocation::Orchard => "orchard",
+            Vocation::Terrace => "terrace",
+            Vocation::Gossip => "gossip",
+            Vocation::Utility => "utility",
+        }
+    }
+
+    pub fn code(self) -> f32 {
+        match self {
+            Vocation::Hydroponics => 0.0,
+            Vocation::Tower => 1.0,
+            Vocation::Delve => 2.0,
+            Vocation::Steward => 3.0,
+            Vocation::Condenser => 4.0,
+            Vocation::Orchard => 5.0,
+            Vocation::Terrace => 6.0,
+            Vocation::Gossip => 7.0,
+            Vocation::Utility => 8.0,
+        }
+    }
+}
+
+/// Prefab kind indices matching Godot `MODULES` in world.gd.
+pub mod module_kind {
+    pub const FARM_BED: u8 = 0;
+    pub const GREENHOUSE: u8 = 1;
+    pub const CONDENSER: u8 = 2;
+    pub const LAMP: u8 = 3;
+}
+
+/// Visual / sim module seat for a cast plot (Godot places meshes; sim owns GH/COND).
+#[derive(Clone, Copy, Debug)]
+pub struct CastModule {
+    pub theta: f32,
+    pub z: f32,
+    pub kind: u8,
+    /// Metres toward the axis (tower stacks). 0 = ground.
+    pub lift_m: f32,
+    pub agent_id: u32,
+}
 
 #[derive(Clone, Copy, Debug)]
 pub struct Traits {
@@ -68,14 +135,162 @@ pub struct Agent {
     /// Last grounded line they said (from chronicle).
     pub last_line: String,
     pub line_day: f32,
+    pub romanceable: bool,
+    pub vocation: Vocation,
+    pub blurb: &'static str,
 }
+
+/// Authored cast seat: name, land, traits. Spread around the drum (1716–1718).
+struct CastSeat {
+    name: &'static str,
+    blurb: &'static str,
+    vocation: Vocation,
+    prefer: u8,
+    alt: u8,
+    /// Preferred angle slot 0..1 around θ.
+    theta_frac: f32,
+    /// Preferred axial band as fraction of length (−0.5..0.5).
+    z_frac: f32,
+    traits: Traits,
+    plot_radius: f32,
+}
+
+const CAST: [CastSeat; CAST_SIZE] = [
+    CastSeat {
+        name: "Hale",
+        blurb: "Ran the wet-ring glass before the colony had names for weather. He worries the condensers more than he admits.",
+        vocation: Vocation::Hydroponics,
+        prefer: province::id::FARMLAND,
+        alt: province::id::SWAMP_BASIN,
+        theta_frac: 0.05,
+        z_frac: 0.08,
+        traits: Traits {
+            patience: 0.85,
+            risk: 0.25,
+            care: 0.92,
+            social: 0.55,
+        },
+        plot_radius: 50.0,
+    },
+    CastSeat {
+        name: "Casimir",
+        blurb: "Believes the drum wants a skyline — works climbing toward the axis. His plot reads as a small tower town before you hear him.",
+        vocation: Vocation::Tower,
+        prefer: province::id::CITY,
+        alt: province::id::FARMLAND,
+        theta_frac: 0.18,
+        z_frac: -0.12,
+        traits: Traits {
+            patience: 0.72,
+            risk: 0.4,
+            care: 0.65,
+            social: 0.92,
+        },
+        plot_radius: 70.0,
+    },
+    CastSeat {
+        name: "Idris",
+        blurb: "Digs until the spoil tells him where the rock ends. Alone on a ridge by choice — his claim is a dark cone of heaps.",
+        vocation: Vocation::Delve,
+        prefer: province::id::MASSIF,
+        alt: province::id::BADLANDS,
+        theta_frac: 0.32,
+        z_frac: 0.22,
+        traits: Traits {
+            patience: 0.28,
+            risk: 0.92,
+            care: 0.22,
+            social: 0.18,
+        },
+        plot_radius: 55.0,
+    },
+    CastSeat {
+        name: "Ren",
+        blurb: "Shares a meadow watershed and will not yield it. Rivalry is trenches and fear-edges, not blades.",
+        vocation: Vocation::Steward,
+        prefer: province::id::MEADOW,
+        alt: province::id::PLATEAU,
+        theta_frac: 0.45,
+        z_frac: -0.05,
+        traits: Traits {
+            patience: 0.55,
+            risk: 0.75,
+            care: 0.8,
+            social: 0.45,
+        },
+        plot_radius: 60.0,
+    },
+    CastSeat {
+        name: "Jules",
+        blurb: "Looks like he belongs at the reactor; works like a man afraid of dust. Condensers in the dune sea are his promise of rain.",
+        vocation: Vocation::Condenser,
+        prefer: province::id::DUNE_SEA,
+        alt: province::id::BADLANDS,
+        theta_frac: 0.58,
+        z_frac: 0.15,
+        traits: Traits {
+            patience: 0.7,
+            risk: 0.2,
+            care: 0.88,
+            social: 0.4,
+        },
+        plot_radius: 48.0,
+    },
+    CastSeat {
+        name: "Oren",
+        blurb: "Orchards on the wet margin. Gaps in the canopy are his handwriting; ash goes back into the same rows.",
+        vocation: Vocation::Orchard,
+        prefer: province::id::SWAMP_BASIN,
+        alt: province::id::MEADOW,
+        theta_frac: 0.70,
+        z_frac: -0.18,
+        traits: Traits {
+            patience: 0.9,
+            risk: 0.3,
+            care: 0.88,
+            social: 0.5,
+        },
+        plot_radius: 45.0,
+    },
+    CastSeat {
+        name: "Sable",
+        blurb: "Mid-slope benches, one man, no followers he will name. Level brush, small spoil, nothing wasted.",
+        vocation: Vocation::Terrace,
+        prefer: province::id::PLATEAU,
+        alt: province::id::KARST,
+        theta_frac: 0.82,
+        z_frac: 0.28,
+        traits: Traits {
+            patience: 0.88,
+            risk: 0.18,
+            care: 0.92,
+            social: 0.28,
+        },
+        plot_radius: 40.0,
+    },
+    CastSeat {
+        name: "Lark",
+        blurb: "Walks other people's plots and remembers who helped whom. Will cross half a claim to tell you what Hale muttered about the glass.",
+        vocation: Vocation::Gossip,
+        prefer: province::id::FARMLAND,
+        alt: province::id::CITY,
+        theta_frac: 0.94,
+        z_frac: -0.25,
+        traits: Traits {
+            patience: 0.5,
+            risk: 0.35,
+            care: 0.55,
+            social: 0.95,
+        },
+        plot_radius: 55.0,
+    },
+];
 
 impl Agent {
     pub fn farmer(id: u32, name: &'static str, theta: f32, z: f32, seed: u32) -> Self {
         let mut pack = Inventory::default();
         pack.max_mass_kg = 55.0;
         pack.max_volume_m3 = 0.05;
-        // Starter tools of the trade — a little seed of their own.
         pack.add_stack(bio_id::SEED, 3.0, 0.006, 0.4);
         pack.add_stack(bio_id::GREEN, 2.0, 0.005, 0.4);
         Self {
@@ -101,37 +316,82 @@ impl Agent {
             alive: true,
             last_line: String::new(),
             line_day: -99.0,
+            romanceable: false,
+            vocation: Vocation::Utility,
+            blurb: "",
         }
+    }
+
+    fn from_cast(id: u32, seat: &CastSeat, theta: f32, z: f32, seed: u32) -> Self {
+        let mut ag = Self::farmer(id, seat.name, theta, z, seed);
+        ag.traits = seat.traits;
+        ag.plot_radius = seat.plot_radius;
+        ag.romanceable = true;
+        ag.vocation = seat.vocation;
+        ag.blurb = seat.blurb;
+        if matches!(
+            seat.vocation,
+            Vocation::Orchard | Vocation::Terrace | Vocation::Hydroponics | Vocation::Condenser
+        ) {
+            ag.pack.add_stack(craft_id::ASH, 4.0, 0.008, 0.5);
+        }
+        ag
     }
 
     fn next_f01(&mut self) -> f32 {
         self.rng = self.rng.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
         (self.rng >> 8) as f32 / (0x00FF_FFFF as f32)
     }
+
+    fn next_f01_ref(&self) -> f32 {
+        let x = self.rng.wrapping_mul(self.id.wrapping_add(1));
+        (x >> 8) as f32 / (0x00FF_FFFF as f32)
+    }
 }
 
 pub struct AgentSim {
     pub agents: Vec<Agent>,
+    /// Modules seeded for the cast — Godot draws them; sim registers GH/COND.
+    pub cast_modules: Vec<CastModule>,
 }
 
 impl AgentSim {
     pub fn new() -> Self {
         Self {
             agents: Vec::with_capacity(MAX_AGENTS_T0),
+            cast_modules: Vec::new(),
         }
     }
 
     pub fn seed_farmers(&mut self, hab: &Habitat, elev: &[f32], n: usize) {
         use crate::terrain::{idx, NT, NZ};
         let n = n.min(MAX_AGENTS_T0);
-        // Sixteen principals — the cast you can actually know. Followers are
-        // counted statistically by their dwelling, never named here.
-        let names = [
-            "Ren", "Jules", "Oren", "Sable", "Pax", "Idris", "Casimir", "Tobin", "Ash", "Nial",
-            "Emre", "Dov", "Lark", "Hale", "Wren", "Sol",
-        ];
         let mut rng = hab.seed ^ 0xA6E17;
         let mut placed = 0usize;
+
+        let cast_n = n.min(CAST_SIZE);
+        for i in 0..cast_n {
+            let seat = &CAST[i];
+            let hint_th = seat.theta_frac * std::f32::consts::TAU;
+            let hint_z = seat.z_frac * hab.length;
+            let (theta, z) = find_province_site(
+                hab,
+                elev,
+                seat.prefer,
+                seat.alt,
+                hint_th,
+                hint_z,
+                &mut rng,
+            )
+            .unwrap_or_else(|| fallback_dry_site(hab, elev, hint_th, hint_z, &mut rng));
+            let ag = Agent::from_cast(placed as u32 + 1, seat, theta, z, rng);
+            self.agents.push(ag);
+            placed += 1;
+        }
+
+        let utility_names = [
+            "Pax", "Tobin", "Ash", "Nial", "Emre", "Dov", "Wren", "Sol",
+        ];
         let mut attempts = 0usize;
         while placed < n && attempts < n * 80 {
             attempts += 1;
@@ -145,46 +405,102 @@ impl AgentSim {
             }
             let theta = ti as f32 / NT as f32 * std::f32::consts::TAU;
             let z = (zi as f32 / NZ as f32 - 0.5) * hab.length;
-            let name = names[placed % names.len()];
-            let mut ag = Agent::farmer(placed as u32 + 1, name, theta, z, rng);
-            // Trait differentiation (1512–1520): two farmers treat land differently.
-            // Four ways to be, which `dwelling::kind_for` reads to decide how
-            // each of them chooses to live. Social is the axis that separates
-            // a town founder from a man who goes to ground.
-            match placed % 4 {
+            let (theta, z) = if placed == CAST_SIZE {
+                if let Some(ren) = self.agents.iter().find(|a| a.name == "Ren") {
+                    (ren.plot_theta + 55.0 / hab.radius, ren.plot_z + 20.0)
+                } else {
+                    (theta, z)
+                }
+            } else {
+                (theta, z)
+            };
+            let uname = utility_names[(placed - cast_n) % utility_names.len()];
+            let mut ag = Agent::farmer(placed as u32 + 1, uname, theta, z, rng);
+            match (placed - cast_n) % 3 {
                 0 => {
-                    // Terracer — careful, patient, keeps to himself.
-                    ag.traits.care = 0.9;
-                    ag.traits.risk = 0.2;
-                    ag.traits.patience = 0.85;
-                    ag.traits.social = 0.35;
-                    ag.plot_radius = 40.0;
+                    ag.traits.care = 0.7;
+                    ag.traits.risk = 0.4;
+                    ag.traits.social = 0.55;
                 }
                 1 => {
-                    // Strip-miner energy — risky, impatient, goes to ground.
-                    ag.traits.care = 0.25;
-                    ag.traits.risk = 0.9;
-                    ag.traits.patience = 0.3;
-                    ag.traits.social = 0.2;
-                    ag.plot_radius = 55.0;
-                }
-                2 => {
-                    // Founder — gathers people, feeds them.
-                    ag.traits.care = 0.7;
-                    ag.traits.risk = 0.35;
-                    ag.traits.patience = 0.6;
-                    ag.traits.social = 0.9;
-                    ag.plot_radius = 65.0;
+                    ag.traits.care = 0.35;
+                    ag.traits.risk = 0.75;
+                    ag.traits.patience = 0.35;
+                    ag.traits.social = 0.3;
+                    ag.plot_radius = 50.0;
                 }
                 _ => {
-                    ag.traits.care = 0.55;
-                    ag.traits.risk = 0.45;
-                    ag.traits.patience = 0.55;
-                    ag.traits.social = 0.6;
+                    ag.traits.care = 0.6;
+                    ag.traits.social = 0.7;
+                    ag.plot_radius = 45.0;
                 }
             }
             self.agents.push(ag);
             placed += 1;
+        }
+    }
+
+    /// Seed vocation modules after plots are final.
+    pub fn seed_cast_modules(&mut self, hab: &Habitat) {
+        self.cast_modules.clear();
+        for ag in &self.agents {
+            if !ag.romanceable {
+                continue;
+            }
+            let th = ag.plot_theta;
+            let zz = ag.plot_z;
+            let r = hab.radius;
+            let push = |mods: &mut Vec<CastModule>, dth_m: f32, dz: f32, kind: u8, lift: f32| {
+                mods.push(CastModule {
+                    theta: (th + dth_m / r).rem_euclid(std::f32::consts::TAU),
+                    z: zz + dz,
+                    kind,
+                    lift_m: lift,
+                    agent_id: ag.id,
+                });
+            };
+            match ag.vocation {
+                Vocation::Hydroponics => {
+                    push(&mut self.cast_modules, 8.0, 0.0, module_kind::GREENHOUSE, 0.0);
+                    push(&mut self.cast_modules, -6.0, 10.0, module_kind::GREENHOUSE, 0.0);
+                    push(&mut self.cast_modules, 0.0, -12.0, module_kind::CONDENSER, 0.0);
+                    push(&mut self.cast_modules, 14.0, 4.0, module_kind::FARM_BED, 0.0);
+                }
+                Vocation::Tower => {
+                    for i in 0..5 {
+                        let lift = i as f32 * 3.2;
+                        let a = i as f32 * 1.2;
+                        push(
+                            &mut self.cast_modules,
+                            a.cos() * 4.0,
+                            a.sin() * 4.0,
+                            if i % 2 == 0 {
+                                module_kind::LAMP
+                            } else {
+                                module_kind::FARM_BED
+                            },
+                            lift,
+                        );
+                    }
+                    push(&mut self.cast_modules, 10.0, 0.0, module_kind::GREENHOUSE, 0.0);
+                }
+                Vocation::Condenser => {
+                    push(&mut self.cast_modules, 6.0, 0.0, module_kind::CONDENSER, 0.0);
+                    push(&mut self.cast_modules, -8.0, 8.0, module_kind::CONDENSER, 0.0);
+                    push(&mut self.cast_modules, 0.0, -10.0, module_kind::FARM_BED, 0.0);
+                }
+                Vocation::Orchard => {
+                    push(&mut self.cast_modules, 5.0, 5.0, module_kind::FARM_BED, 0.0);
+                    push(&mut self.cast_modules, -7.0, -3.0, module_kind::FARM_BED, 0.0);
+                }
+                Vocation::Gossip => {
+                    push(&mut self.cast_modules, 4.0, 0.0, module_kind::LAMP, 0.0);
+                }
+                Vocation::Terrace | Vocation::Steward => {
+                    push(&mut self.cast_modules, 6.0, 2.0, module_kind::FARM_BED, 0.0);
+                }
+                Vocation::Delve | Vocation::Utility => {}
+            }
         }
     }
 
@@ -235,10 +551,20 @@ impl AgentSim {
                 light,
             );
 
-            if day - ag.line_day > 0.8 && ag.traits.social > 0.4 {
+            let social_gate = if ag.vocation == Vocation::Gossip {
+                0.25
+            } else {
+                0.4
+            };
+            let talk_r = if ag.vocation == Vocation::Gossip {
+                75.0
+            } else {
+                55.0
+            };
+            if day - ag.line_day > 0.8 && ag.traits.social > social_gate {
                 let dth = angle_arc(ag.theta, player_theta) * hab_r;
                 let dz = ag.z - player_z;
-                if dth * dth + dz * dz < 55.0 * 55.0 {
+                if dth * dth + dz * dz < talk_r * talk_r {
                     if let Some(line) = chronicle.remark_about_player(ag.theta, ag.z, hab_r) {
                         ag.last_line = format!("{}: {}", ag.name, line);
                         ag.line_day = day;
@@ -251,11 +577,105 @@ impl AgentSim {
                             1.0,
                             ag.last_line.clone(),
                         );
+                    } else if ag.romanceable && !ag.blurb.is_empty() {
+                        ag.last_line = format!("{}: {}", ag.name, ag.blurb);
+                        ag.line_day = day;
                     }
                 }
             }
         }
     }
+}
+
+fn find_province_site(
+    hab: &Habitat,
+    elev: &[f32],
+    prefer: u8,
+    alt: u8,
+    hint_th: f32,
+    hint_z: f32,
+    rng: &mut u32,
+) -> Option<(f32, f32)> {
+    use crate::terrain::{idx, NT, NZ};
+    let (dt_m, dz_m) = (
+        std::f32::consts::TAU * hab.radius / NT as f32,
+        hab.length / NZ as f32,
+    );
+    let ti0 = (hint_th / std::f32::consts::TAU * NT as f32).round() as i32;
+    let zi0 = ((hint_z / hab.length + 0.5) * NZ as f32).round() as i32;
+    let mut best: Option<(f32, usize, usize)> = None;
+    let rt = (900.0 / dt_m) as i32;
+    let rz = (900.0 / dz_m) as i32;
+    let stride = 4i32;
+    let mut dz = -rz;
+    while dz <= rz {
+        let zi = zi0 + dz;
+        if zi >= 0 && zi < NZ as i32 {
+            let mut dt = -rt;
+            while dt <= rt {
+                let ti = (ti0 + dt).rem_euclid(NT as i32) as usize;
+                let zi = zi as usize;
+                let e = elev[idx(ti, zi)];
+                if e >= hab.water_level + 4.0 && e <= hab.max_elevation * 0.78 {
+                    let th = ti as f32 / NT as f32 * std::f32::consts::TAU;
+                    let z = (zi as f32 / NZ as f32 - 0.5) * hab.length;
+                    let prim = province::dominant_at(hab, th, z);
+                    let score = if prim == prefer {
+                        2.0
+                    } else if prim == alt {
+                        1.0
+                    } else {
+                        0.0
+                    };
+                    if score > 0.0 {
+                        let mx = dt as f32 * dt_m;
+                        let my = dz as f32 * dz_m;
+                        let dist = (mx * mx + my * my).sqrt();
+                        let s = score * 1000.0 - dist;
+                        if best.map(|(b, _, _)| s > b).unwrap_or(true) {
+                            best = Some((s, ti, zi));
+                        }
+                    }
+                }
+                dt += stride;
+            }
+        }
+        dz += stride;
+    }
+    let _ = rng;
+    best.map(|(_, ti, zi)| {
+        let th = ti as f32 / NT as f32 * std::f32::consts::TAU;
+        let z = (zi as f32 / NZ as f32 - 0.5) * hab.length;
+        (th, z)
+    })
+}
+
+fn fallback_dry_site(
+    hab: &Habitat,
+    elev: &[f32],
+    hint_th: f32,
+    hint_z: f32,
+    rng: &mut u32,
+) -> (f32, f32) {
+    use crate::terrain::{idx, NT, NZ};
+    for _ in 0..40 {
+        *rng = rng.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+        let dth = ((*rng >> 8) as f32 / (0x00FF_FFFF as f32) - 0.5) * 0.4;
+        *rng = rng.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+        let dz = ((*rng >> 8) as f32 / (0x00FF_FFFF as f32) - 0.5) * 400.0;
+        let th = (hint_th + dth).rem_euclid(std::f32::consts::TAU);
+        let z = (hint_z + dz).clamp(-hab.length * 0.45, hab.length * 0.45);
+        let ti = (th / std::f32::consts::TAU * NT as f32).round() as usize % NT;
+        let zi = (((z / hab.length + 0.5) * NZ as f32).round() as usize).min(NZ - 1);
+        let e = elev[idx(ti, zi)];
+        if e >= hab.water_level + 4.0 && e <= hab.max_elevation * 0.78 {
+            return (th, z);
+        }
+    }
+    (
+        hint_th.rem_euclid(std::f32::consts::TAU),
+        hint_z.clamp(-hab.length * 0.4, hab.length * 0.4),
+    )
 }
 
 fn choose_goal(ag: &Agent, light: f32, player_theta: f32, player_z: f32, hab_r: f32) -> Goal {
@@ -276,19 +696,69 @@ fn choose_goal(ag: &Agent, light: f32, player_theta: f32, player_z: f32, hab_r: 
     if ag.fatigue > 0.75 || light < 0.25 {
         return Goal::Rest;
     }
-    // Social: approach player if nearby and mood ok.
     let dth = angle_arc(ag.theta, player_theta) * hab_r;
     let dz = ag.z - player_z;
-    if ag.traits.social > 0.5
-        && ag.mood > 0.4
-        && dth * dth + dz * dz < 90.0 * 90.0
-        && dth * dth + dz * dz > 12.0 * 12.0
+    let dist2 = dth * dth + dz * dz;
+    let approach_r = if ag.vocation == Vocation::Gossip {
+        120.0
+    } else {
+        90.0
+    };
+    let social_need = if ag.vocation == Vocation::Gossip {
+        0.35
+    } else {
+        0.5
+    };
+    if ag.traits.social > social_need
+        && ag.mood > 0.35
+        && dist2 < approach_r * approach_r
+        && dist2 > 12.0 * 12.0
     {
         return Goal::ApproachPlayer;
     }
     if ag.pack.mass_of(bio_id::SEED) > 4.0 && ag.pack.mass_of(craft_id::FLOUR) < 2.0 {
         return Goal::CraftFood;
     }
+
+    match ag.vocation {
+        Vocation::Orchard | Vocation::Hydroponics => {
+            if ag.traits.care > 0.5 && ag.pack.mass_of(craft_id::ASH) > 0.5 && ag.next_f01_ref() < 0.4
+            {
+                return Goal::Amend;
+            }
+            if ag.next_f01_ref() < 0.55 {
+                return Goal::Harvest;
+            }
+            return Goal::Dig;
+        }
+        Vocation::Delve | Vocation::Steward | Vocation::Tower => {
+            if ag.traits.risk > 0.3 && ag.next_f01_ref() < 0.55 {
+                return Goal::Dig;
+            }
+            if ag.next_f01_ref() < 0.35 {
+                return Goal::Harvest;
+            }
+        }
+        Vocation::Condenser | Vocation::Terrace => {
+            if ag.pack.mass_of(craft_id::ASH) > 0.5 && ag.next_f01_ref() < 0.45 {
+                return Goal::Amend;
+            }
+            if ag.next_f01_ref() < 0.4 {
+                return Goal::Dig;
+            }
+            return Goal::Harvest;
+        }
+        Vocation::Gossip => {
+            if dist2 < approach_r * approach_r && dist2 > 8.0 * 8.0 && ag.next_f01_ref() < 0.6 {
+                return Goal::ApproachPlayer;
+            }
+            if ag.next_f01_ref() < 0.5 {
+                return Goal::Harvest;
+            }
+        }
+        Vocation::Utility => {}
+    }
+
     if ag.traits.care > 0.5 && ag.pack.mass_of(craft_id::ASH) > 0.5 {
         return Goal::Amend;
     }
@@ -299,14 +769,6 @@ fn choose_goal(ag: &Agent, light: f32, player_theta: f32, player_z: f32, hab_r: 
         return Goal::Dig;
     }
     Goal::Harvest
-}
-
-// Helper without mut — use a cheap hash of state instead for choose_goal branch.
-impl Agent {
-    fn next_f01_ref(&self) -> f32 {
-        let x = self.rng.wrapping_mul(self.id.wrapping_add(1));
-        (x >> 8) as f32 / (0x00FF_FFFF as f32)
-    }
 }
 
 fn execute_goal(
@@ -377,7 +839,6 @@ fn execute_goal(
         }
         Goal::Harvest => {
             wander_in_plot(ag, dt, light);
-            // Perception bound to plot (1491 lite): only crops they can "see" on their land.
             if let Some(i) = nearest_plant(plants, ag.theta, ag.z, ag.plot_radius, hab.radius) {
                 let y = economy::harvest_plant(&plants.plants[i]);
                 plants.plants[i].alive = false;
@@ -399,17 +860,26 @@ fn execute_goal(
         Goal::Dig => {
             wander_in_plot(ag, dt * 0.5, light);
             let surf = ter.surface_radius(ag.theta, ag.z);
+            let brush = match ag.vocation {
+                Vocation::Delve => 2.4,
+                Vocation::Steward | Vocation::Tower => 2.0,
+                _ => 1.8,
+            };
+            let level = ag.traits.care > 0.65
+                || matches!(
+                    ag.vocation,
+                    Vocation::Terrace | Vocation::Condenser | Vocation::Steward
+                );
             let p = hab.to_world(ag.theta, ag.z, surf - 0.4);
-            if let Some(y) = ter.dig(p, 1.8, 1.0, ag.traits.care > 0.65) {
+            if let Some(y) = ter.dig(p, brush, 1.0, level) {
                 let accepted = ag.pack.try_add(&y);
-                // Leave spoil so their work is visible (1418 / 1491 neighbour read).
-                let spoil_frac = (1.0 - accepted).max(0.18);
-                // High-risk agents dig harder and leave more spoil (1540).
-                let spoil_frac = if ag.traits.risk > 0.6 {
-                    spoil_frac.max(0.35)
-                } else {
-                    spoil_frac
-                };
+                let mut spoil_frac = (1.0 - accepted).max(0.18);
+                if ag.traits.risk > 0.6 || ag.vocation == Vocation::Delve {
+                    spoil_frac = spoil_frac.max(0.4);
+                }
+                if matches!(ag.vocation, Vocation::Terrace | Vocation::Condenser) {
+                    spoil_frac = spoil_frac.min(0.22);
+                }
                 for part in &y.parts {
                     economy::deposit_heap(
                         heaps,
@@ -483,7 +953,6 @@ fn wander_in_plot(ag: &mut Agent, dt: f32, light: f32) {
     let step = (6.0 + ag.traits.risk * 4.0) * dt * (0.4 + 0.6 * light);
     let th2 = ag.theta + ang.cos() * step / 900.0;
     let z2 = ag.z + ang.sin() * step;
-    // Soft clamp to plot.
     let dth = angle_arc(th2, ag.plot_theta) * 900.0;
     let dz = z2 - ag.plot_z;
     if dth * dth + dz * dz < ag.plot_radius * ag.plot_radius {
@@ -553,6 +1022,8 @@ mod tests {
         let mut sim = AgentSim::new();
         sim.seed_farmers(&hab, &ter.elev, 1);
         assert_eq!(sim.agents.len(), 1);
+        assert!(sim.agents[0].romanceable);
+        assert_eq!(sim.agents[0].name, "Hale");
         let strokes0 = ter.edits.len();
         let mut soil = crate::soil::Soil::new(hab, &ter.elev, &ter.flow.flux, &ter.elev0);
         let mut heaps = Vec::new();
@@ -577,5 +1048,20 @@ mod tests {
             ter.edits.len() > strokes0 || chron.len() > 0 || !heaps.is_empty(),
             "agent should dig or leave chronicle / spoil traces"
         );
+    }
+
+    #[test]
+    fn cast_eight_seats_romanceable() {
+        let hab = Habitat::kepler_drum();
+        let ter = Terrain::generate(hab);
+        let mut sim = AgentSim::new();
+        sim.seed_farmers(&hab, &ter.elev, 10);
+        assert_eq!(sim.agents.len(), 10);
+        let cast: Vec<_> = sim.agents.iter().filter(|a| a.romanceable).collect();
+        assert_eq!(cast.len(), 8);
+        assert_eq!(cast[0].name, "Hale");
+        assert_eq!(cast[7].name, "Lark");
+        sim.seed_cast_modules(&hab);
+        assert!(!sim.cast_modules.is_empty());
     }
 }
